@@ -226,6 +226,11 @@ fn claim_instance() -> bool {
 /// 结束某个 PID（`autostart off` 用）。仅当它确实是本程序才动手，
 /// 否则心跳里的旧 PID 被系统复用时会误杀别人的进程。
 fn stop_pid(pid: u32) -> bool {
+    // 心跳文件里可能残留刚退出进程的 PID，而 Windows 会复用 PID——
+    // 万一副本恰好拿到同一个号，这里就会把自己杀掉。先挡住。
+    if pid == std::process::id() {
+        return false;
+    }
     if !pid_is_ours(pid) {
         return false;
     }
@@ -324,6 +329,24 @@ fn start_supervise() -> Result<()> {
     Ok(())
 }
 
+/// 复制 exe，遇到「文件被占用」（ERROR_SHARING_VIOLATION / ACCESS_DENIED）时重试：
+/// 刚被结束的守护进程还要几百毫秒才释放映像，一次性 copy 会误判成「覆盖不了」。
+fn copy_with_retry(from: &Path, to: &Path, budget: std::time::Duration) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        match std::fs::copy(from, to) {
+            Ok(_) => return Ok(()),
+            Err(e) if matches!(e.raw_os_error(), Some(32) | Some(5)) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn write_autostart(target: Option<&str>) -> Result<()> {
     let current = std::env::current_exe().context("无法定位 workbuddy-pet.exe")?;
     let log = data_dir().join("watch.log");
@@ -340,12 +363,19 @@ fn write_autostart(target: Option<&str>) -> Result<()> {
         if let Some(dir) = installed.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        match std::fs::copy(&current, &installed) {
+        // 副本可能正被看门狗或守护执行，而 Windows 不允许覆盖运行中的 exe。
+        // 不先停掉的话，「下载新 exe 再跑一次 autostart on」这条升级路径会静默
+        // 留在旧版本——用户以为换了版本，实际还在跑上一版。
+        if installed.is_file() && (supervise_running() || guard_alive()) {
+            println!("检测到旧版本仍在运行，先停掉再替换副本…");
+            stop_running();
+        }
+        match copy_with_retry(&current, &installed, std::time::Duration::from_secs(5)) {
             Ok(_) => exe = installed.clone(),
             Err(e) if installed.is_file() => {
-                // 副本正在被守护用着，Windows 不允许覆盖——沿用旧副本，提示怎么升级。
+                // 进程刚被杀时映像还要一会儿才释放，重试也没成功就沿用旧副本。
                 eprintln!("无法覆盖已安装副本（{e}），继续使用 {}", installed.display());
-                eprintln!("要换版本：先 `workbuddy-pet autostart off` 或结束守护，再执行一次 on。");
+                eprintln!("要换版本：先 `workbuddy-pet autostart off`，再执行一次 on。");
                 exe = installed.clone();
             }
             Err(e) => {

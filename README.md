@@ -38,27 +38,27 @@
 ### 下载即用（最快，无需编译）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.1.2-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
+`workbuddy-pet-0.1.3-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
 （约 5.4 MB），不依赖 .NET、不依赖 VC++ 运行库、不需要 Rust 工具链，也不用管 SDK 目录：
 
 ```powershell
-.\workbuddy-pet-0.1.2-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
+.\workbuddy-pet-0.1.3-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
 Start-Sleep 9                                                # 固件释放单连接约需 8 秒
-.\workbuddy-pet-0.1.2-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
-.\workbuddy-pet-0.1.2-windows-x64.exe autostart on --target <IP>
+.\workbuddy-pet-0.1.3-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
+.\workbuddy-pet-0.1.3-windows-x64.exe autostart on --target <IP>
 ```
 
 下载页同时给出 `SHA256SUMS.txt`，可核对文件完整性：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.1.2-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.1.3-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 二进制仍然**只是宠物程序**：它读本机 WorkBuddy 的会话数据，并直接连局域网里的 Note 4；
 不会安装驱动、不写系统目录、不需要管理员权限（开机自启写在当前用户的启动文件夹）。
 
-升级就是下载新 exe 再跑一次 `autostart on`：它把副本换成新版本、重启看门狗，
-`autostart` 指向的是副本路径，不用重设；设置与任务记录都在
+升级就是下载新 exe 再跑一次 `autostart on`：它先停掉旧版本、把副本换成新版本、再重启看门狗，
+不用手动 `off`；`autostart` 指向的是副本路径，不用重设；设置与任务记录都在
 `%LOCALAPPDATA%\zectrix-workbuddy-pet` 里，换 exe 不会丢。
 
 ### 交给 AI 编译（要改代码时）
