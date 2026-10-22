@@ -222,6 +222,17 @@ struct Store {
     /// 在设备超时重连、守护重启后依然不重复响——同一次等待只吵人一次。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     announced: Option<String>,
+    /// 守护模式下，最后一个任务结束到交还设备之间保留多久（秒）。
+    /// 留一段时间是为了让「任务完成」画面停在屏上，也给连续追问留出无缝衔接；
+    /// 这段时间内又有新任务就不用断开重连。
+    #[serde(default = "default_idle_grace")]
+    idle_grace: u32,
+}
+
+/// 任务结束后再占着设备的宽限。墨水屏断电后画面不会消失（完成页留在屏上不需要
+/// 靠连接维持），所以这里只需够「连续追问」衔接用，不必长占设备。
+fn default_idle_grace() -> u32 {
+    30
 }
 
 fn default_format() -> String {
@@ -235,6 +246,7 @@ impl Default for Store {
             target: None,
             format: default_format(),
             announced: None,
+            idle_grace: default_idle_grace(),
         }
     }
 }
@@ -279,6 +291,9 @@ fn save_store(store: &Store) -> Result<()> {
         // 沿用磁盘上的，避免守护重启后把同一条等待又响一遍。
         if out.announced.is_none() {
             out.announced = disk.announced;
+        }
+        if out.idle_grace == default_idle_grace() && disk.idle_grace != default_idle_grace() {
+            out.idle_grace = disk.idle_grace;
         }
     }
     let tmp = path.with_extension("json.tmp");
@@ -454,6 +469,24 @@ fn render(model: &Model, frame: usize) -> Result<Vec<u8>> {
     let fonts = Fonts::load()?;
     let scene = layout::draw(model, now(), frame);
     raster::to_png(&scene, &fonts)
+}
+
+/// 设备占用闸门：只有在「有活跃任务」期间才该占着设备，任务结束后再静默
+/// `grace` 秒就交还。墨水屏刷新贵、设备也只有一个连接，长期占着会让别的程序
+/// 和设备自己都进不了场；而只看文件、不连设备的待命几乎不花代价。
+///
+/// 判定用「最后一个任务多久没动静」而不是内存计时器：重启、重连后依然成立，
+/// 也天然覆盖「任务在断开期间结束」的情况。超过 `stale_minutes` 没更新的任务
+/// 已经算「状态待确认」，同样不再占着设备——否则一张被遗忘的确认卡会锁死设备。
+fn may_release(model: &Model, at: i64, grace: i64) -> bool {
+    if !model.running(at).is_empty() {
+        return false;
+    }
+    match model.tasks.iter().map(|t| t.updated_at).max() {
+        Some(last) => at.saturating_sub(last) >= grace.max(0),
+        // 一个任务都没有（比如手动 run --standby）：没有可等的，直接交还。
+        None => true,
+    }
 }
 
 /// 扫描一次会话：只有真实状态变化才落盘、打日志、响提示音。
@@ -1039,6 +1072,12 @@ async fn cmd_run(args: &Args) -> Result<()> {
     }
 
     let watch = args.has("exit-with-workbuddy");
+    // 待命模式（守护用）：任务结束就交还设备。手动 `run` 默认一直占着，便于调试。
+    let standby = args.has("standby");
+    let grace = args
+        .get("idle-grace")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(store.idle_grace) as i64;
     let mut frame = 0usize;
     let mut last_sig: Option<String> = None;
     let mut scan_tick = tokio::time::interval(Duration::from_secs(2));
@@ -1066,6 +1105,12 @@ async fn cmd_run(args: &Args) -> Result<()> {
             _ = scan_tick.tick() => {
                 if watch && !workbuddy_running() {
                     println!("WorkBuddy 已退出：正常断开设备，回到待命。");
+                    break Ok(());
+                }
+                // 交还设备的判定放在扫描之前：判定用上一拍的状态，
+                // grace 以秒计，差一拍不影响，却让「跟随已关闭」时也能正常释放。
+                if standby && may_release(&model, now(), grace) {
+                    println!("任务已结束（{grace} 秒内没有活跃任务）：释放设备，回到待命。");
                     break Ok(());
                 }
                 if !model.settings.follow_enabled {
@@ -1128,9 +1173,48 @@ async fn cmd_run(args: &Args) -> Result<()> {
     outcome
 }
 
-/// 守护：WorkBuddy 一启动就连接设备并跟随状态，退出就断开回到待命。
-/// 设备休眠/空闲会主动断开（Timeout），这类断线必须能自愈：按 15 秒步长退避重连，
-/// 连续失败 5 次才停止（避免反复抢占设备）。ResultUnknown 不重发、不抢连接——
+/// 待命：只读会话文件，不连设备，等到出现活跃任务（正在工作/等你处理）为止。
+/// 返回 `true` = 该去占用设备了；`false` = WorkBuddy 已退出，回外层重新等。
+/// 这里刻意不响铃、不推屏：设备还没连上，也还不该被占用。
+async fn wait_for_task(store: &mut Store, watcher: &mut Watcher) -> Result<bool> {
+    let mut tick = tokio::time::interval(Duration::from_secs(2));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if !workbuddy_running() {
+            println!("WorkBuddy 已退出：结束待命。");
+            return Ok(false);
+        }
+        if !store.model.settings.follow_enabled {
+            continue;
+        }
+        let (events, changed) = scan_into(&mut store.model, watcher);
+        if changed {
+            if let Err(e) = save_store(store) {
+                eprintln!("配置保存失败: {e}");
+            }
+        }
+        for ev in events {
+            println!(
+                "[状态] {} · {} → {}{}",
+                ev.title,
+                ev.task_id,
+                ev.status.label(),
+                ev.progress
+                    .map(|p| format!("（清单 {p}%）"))
+                    .unwrap_or_default()
+            );
+        }
+        if !store.model.running(now()).is_empty() {
+            return Ok(true);
+        }
+    }
+}
+
+/// 守护：WorkBuddy 一启动就进入待命（只读会话、不占设备），一有任务才开始占用
+/// 设备推送；任务全部结束并静默 `idle_grace` 秒就交还设备，回到待命。
+/// 设备休眠/空闲会主动断开（Timeout），这类断线按 15 秒步长退避重连，
+/// 连续失败 5 次才停（避免反复抢占设备）。ResultUnknown 不重发、不抢连接——
 /// 这条 SDK 约定只约束「同一次显示请求」，不影响断线后的重新建连。
 async fn cmd_watch(args: &Args) -> Result<()> {
     // 显式给了地址就记住：下次 `watch` / `run` / `push` 不带参数也能连上。
@@ -1141,16 +1225,33 @@ async fn cmd_watch(args: &Args) -> Result<()> {
             save_store(&store)?;
         }
     }
-    let target = args.get("target").map(str::to_string).or(store.target);
+    if let Some(g) = args.get("idle-grace").and_then(|v| v.parse::<u32>().ok()) {
+        if store.idle_grace != g {
+            store.idle_grace = g;
+            save_store(&store)?;
+        }
+    }
+    let target = args
+        .get("target")
+        .map(str::to_string)
+        .or_else(|| store.target.clone());
+    let grace = store.idle_grace;
     println!(
-        "守护模式已启动：目标 {}；等待 WorkBuddy…",
+        "守护模式已启动：目标 {}；有任务才占用设备，{grace} 秒无活跃任务即交还。",
         target.as_deref().unwrap_or("自动发现")
     );
+    let mut watcher = Watcher::new(workbuddy_root());
     loop {
         if !workbuddy_running() {
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
+        println!("检测到 WorkBuddy，进入待命（只读会话，不占用设备）。");
+        if !wait_for_task(&mut store, &mut watcher).await? {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+        println!("检测到任务，开始占用设备。");
         let mut session = Args {
             cmd: "run".into(),
             flags: args.flags.clone(),
@@ -1158,19 +1259,24 @@ async fn cmd_watch(args: &Args) -> Result<()> {
         session
             .flags
             .push(("exit-with-workbuddy".into(), "true".into()));
-        println!("检测到 WorkBuddy，开始跟随状态。");
+        session.flags.push(("standby".into(), "true".into()));
         let mut fails = 0u32;
+        let mut exhausted = false;
         loop {
             match cmd_run(&session).await {
-                Ok(()) => {
-                    println!("本次会话结束，继续待命…");
-                    break;
-                }
+                // 任务结束交还设备、或 WorkBuddy 退出：都回外层重新待命。
+                Ok(()) => break,
                 Err(e) => {
                     eprintln!("本次会话异常结束：{e}");
+                    // 拿不到设备时别硬抢：已经没有活跃任务就把设备让出来。
+                    if load_store().model.running(now()).is_empty() {
+                        println!("已无活跃任务，不再重连。");
+                        break;
+                    }
                     fails += 1;
                     if fails > 5 {
-                        eprintln!("连续失败 {fails} 次，暂停重连，等待 WorkBuddy 重启后再试");
+                        eprintln!("连续失败 {fails} 次，暂停重连，等下一个任务再试。");
+                        exhausted = true;
                         break;
                     }
                     if !workbuddy_running() {
@@ -1182,10 +1288,11 @@ async fn cmd_watch(args: &Args) -> Result<()> {
                 }
             }
         }
-        while workbuddy_running() {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+        if exhausted {
+            // 设备可能正在休眠或被人占用：先冷一会儿再回待命，否则
+            // 「待命→发现有任务→重连→失败」会立刻转成高频循环。
+            tokio::time::sleep(Duration::from_secs(60)).await;
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
@@ -1243,8 +1350,9 @@ fn usage() {
                                                           单次推送后立即断开
   workbuddy-pet run     [--target IP|ID] [--format F] [--volume 0-100] [--no-sound] [--no-animation]
                                                           常驻：跟随状态、按键翻页、提示音
-  workbuddy-pet watch   [--target IP|ID]                           守护：WorkBuddy 启动即连、退出即断
-  workbuddy-pet autostart on|off|status [--target IP|ID]           开机自启（写启动文件夹，后台等待 WorkBuddy）
+  workbuddy-pet watch   [--target IP|ID] [--idle-grace 秒]         守护：WorkBuddy 一启动就待命，有任务才占用设备，
+                                                          任务结束静默 N 秒（默认 60）后交还并回到待命
+  workbuddy-pet autostart on|off|status [--target IP|ID]           开机自启（写启动文件夹，后台待命）
   workbuddy-pet where                                              显示数据与配置路径
   workbuddy-pet forget                                             删除本机状态缓存
 
@@ -1308,5 +1416,86 @@ async fn main() {
     if let Err(e) = result {
         eprintln!("错误: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use workbuddy_pet::model::ProgressSource;
+
+    fn event(seq: u64, status: Status) -> TaskEvent {
+        TaskEvent {
+            task_id: "t1".into(),
+            thread_id: None,
+            seq,
+            status,
+            title: "真实任务".into(),
+            detail: String::new(),
+            progress: None,
+            progress_source: ProgressSource::Agent,
+            progress_steps: None,
+            agent: "WorkBuddy".into(),
+        }
+    }
+
+    fn model_with(seq: u64, status: Status, at: i64) -> Model {
+        let mut m = Model::default();
+        m.settings.follow_enabled = true;
+        m.apply(event(seq, status), "workbuddy", at).unwrap();
+        m
+    }
+
+    #[test]
+    fn releases_only_after_the_grace_period_with_no_active_task() {
+        // 任务在跑：不管多久都占着。
+        let m = model_with(1, Status::Working, 5_000);
+        assert!(!may_release(&m, 5_000, 60));
+        assert!(!may_release(&m, 5_300, 60));
+        // 任务完成：从完成那一刻起算，满 60 秒才交还。
+        let m = model_with(1, Status::Done, 200);
+        assert!(!may_release(&m, 200, 60));
+        assert!(!may_release(&m, 259, 60));
+        assert!(may_release(&m, 260, 60));
+    }
+
+    #[test]
+    fn a_new_task_cancels_a_pending_release() {
+        let mut m = model_with(1, Status::Done, 200);
+        assert!(!may_release(&m, 230, 60));
+        // 宽限期内用户又发了一条：继续占着，不必断开再重连。
+        m.apply(event(2, Status::Working), "workbuddy", 230).unwrap();
+        assert!(!may_release(&m, 231, 60));
+        assert!(!may_release(&m, 400, 60));
+        // 再次结束后重新计时。
+        m.apply(event(3, Status::Done), "workbuddy", 410).unwrap();
+        assert!(!may_release(&m, 410, 60));
+        assert!(may_release(&m, 470, 60));
+    }
+
+    #[test]
+    fn waiting_holds_the_device_but_an_abandoned_prompt_does_not_lock_it() {
+        // 「等你处理」是活跃任务：用户还没回来，必须继续占着设备提醒。
+        let m = model_with(1, Status::Waiting, 100);
+        assert!(!may_release(&m, 100, 60));
+        assert!(!may_release(&m, 800, 60));
+        // 超过 stale_minutes（默认 15 分钟）没动静 → 「状态待确认」，不再算活跃；
+        // 一张被遗忘的确认卡不能把设备锁到天荒地老。
+        assert!(may_release(&m, 2_000, 60));
+        // 一直有进展的任务同理：静默超过 15 分钟就交还。
+        let m = model_with(1, Status::Working, 100);
+        assert!(!may_release(&m, 1_000, 60));
+        assert!(may_release(&m, 1_100, 60));
+    }
+
+    #[test]
+    fn zero_or_absent_grace_releases_immediately() {
+        let m = model_with(1, Status::Done, 100);
+        assert!(may_release(&m, 100, 0));
+        // 负值按 0 处理，不会卡住不交还。
+        assert!(may_release(&m, 100, -5));
+        // 一个任务都没有（手动 run --standby）：直接交还。
+        let m = Model::default();
+        assert!(may_release(&m, 100, 60));
     }
 }
