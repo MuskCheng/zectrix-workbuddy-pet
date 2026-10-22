@@ -34,8 +34,8 @@ fn load_first(names: &[&str]) -> Result<Font> {
         if !path.is_file() {
             continue;
         }
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("无法读取字体 {}", path.display()))?;
+        let bytes =
+            std::fs::read(&path).with_context(|| format!("无法读取字体 {}", path.display()))?;
         match Font::from_bytes(
             bytes,
             FontSettings {
@@ -47,7 +47,10 @@ fn load_first(names: &[&str]) -> Result<Font> {
             Err(e) => tried.push(format!("{}: {e}", path.display())),
         }
     }
-    anyhow::bail!("没有可用的中文字体（尝试过 {names:?}）：{}", tried.join("; "))
+    anyhow::bail!(
+        "没有可用的中文字体（尝试过 {names:?}）：{}",
+        tried.join("; ")
+    )
 }
 
 impl Fonts {
@@ -112,8 +115,7 @@ impl Canvas {
                 let dy = (py as f32 + 0.5 - cy).abs() - hy;
                 // 圆角矩形 SDF（标准公式，末尾必须减 r）：内部为负，外部为正；
                 // 0.5px 过渡带做抗锯齿
-                let dist =
-                    dx.max(dy).min(0.0) + dx.max(0.0).hypot(dy.max(0.0)) - r;
+                let dist = dx.max(dy).min(0.0) + dx.max(0.0).hypot(dy.max(0.0)) - r;
                 let cov = ((0.5 - dist) * 255.0).clamp(0.0, 255.0) as u8;
                 if cov > 0 {
                     self.blend(px, py, cov, gray);
@@ -245,7 +247,10 @@ mod tests {
 
     #[test]
     fn canvas_is_400x300_white_by_default() {
-        let px = render(&json!({"canvas":{"w":400,"h":300},"elements":[]}), &Fonts::load().unwrap());
+        let px = render(
+            &json!({"canvas":{"w":400,"h":300},"elements":[]}),
+            &Fonts::load().unwrap(),
+        );
         assert_eq!(px.len(), 400 * 300);
         assert!(px.iter().all(|p| *p == 255));
     }
@@ -257,30 +262,56 @@ mod tests {
     #[test]
     fn rect_fill_and_stroke() {
         let f = Fonts::load().unwrap();
-        let filled = render(&json!({"elements":[{"type":"rect","x":10,"y":10,"w":20,"h":20,"fill":0}]}), &f);
+        let filled = render(
+            &json!({"elements":[{"type":"rect","x":10,"y":10,"w":20,"h":20,"fill":0}]}),
+            &f,
+        );
         assert_eq!(dark(&filled), 400);
         // w=0/h=0 的描边退化为 1px 直线
-        let line = render(&json!({"elements":[{"type":"rect","x":16,"y":82,"w":100,"h":0}]}), &f);
+        let line = render(
+            &json!({"elements":[{"type":"rect","x":16,"y":82,"w":100,"h":0}]}),
+            &f,
+        );
         assert_eq!(dark(&line), 100);
-        let vline = render(&json!({"elements":[{"type":"rect","x":16,"y":80,"w":0,"h":10}]}), &f);
+        let vline = render(
+            &json!({"elements":[{"type":"rect","x":16,"y":80,"w":0,"h":10}]}),
+            &f,
+        );
         assert_eq!(dark(&vline), 10);
     }
 
     #[test]
     fn text_draws_ink_and_respects_width_limit() {
         let f = Fonts::load().unwrap();
-        let wide = render(&json!({"elements":[{"type":"text","content":"工作搭子","x":20,"y":60,"size":28,"width_limit":300}]}), &f);
+        let wide = render(
+            &json!({"elements":[{"type":"text","content":"工作搭子","x":20,"y":60,"size":28,"width_limit":300}]}),
+            &f,
+        );
         assert!(dark(&wide) > 100, "文字应产生黑色像素");
-        let clipped = render(&json!({"elements":[{"type":"text","content":"工作搭子","x":20,"y":60,"size":28,"width_limit":40}]}), &f);
+        let clipped = render(
+            &json!({"elements":[{"type":"text","content":"工作搭子","x":20,"y":60,"size":28,"width_limit":40}]}),
+            &f,
+        );
         assert!(dark(&clipped) < dark(&wide), "超宽内容必须裁剪");
         // 裁剪只作用于 x 之后：起点左侧与宽度上限右侧都必须保持白色
-        let narrow = render(&json!({"elements":[{"type":"text","content":"工作搭子","x":300,"y":60,"size":28,"width_limit":20}]}), &f);
+        let narrow = render(
+            &json!({"elements":[{"type":"text","content":"工作搭子","x":300,"y":60,"size":28,"width_limit":20}]}),
+            &f,
+        );
         for y in 0..300 {
             for x in 0..300 {
-                assert_eq!(narrow[(y * 400 + x) as usize], 255, "文字起点左侧必须保持白色");
+                assert_eq!(
+                    narrow[(y * 400 + x) as usize],
+                    255,
+                    "文字起点左侧必须保持白色"
+                );
             }
             for x in 320..400 {
-                assert_eq!(narrow[(y * 400 + x) as usize], 255, "宽度限制外必须保持白色");
+                assert_eq!(
+                    narrow[(y * 400 + x) as usize],
+                    255,
+                    "宽度限制外必须保持白色"
+                );
             }
         }
     }
@@ -288,7 +319,10 @@ mod tests {
     #[test]
     fn right_aligned_text_hugs_the_right_edge() {
         let f = Fonts::load().unwrap();
-        let px = render(&json!({"elements":[{"type":"text","content":"跟随","x":0,"y":60,"size":20,"width_limit":400,"align":"right"}]}), &f);
+        let px = render(
+            &json!({"elements":[{"type":"text","content":"跟随","x":0,"y":60,"size":20,"width_limit":400,"align":"right"}]}),
+            &f,
+        );
         let cols: Vec<i32> = (0..400)
             .filter(|x| (0..300).any(|y| px[(y * 400 + x) as usize] < 200))
             .collect();
@@ -303,7 +337,10 @@ mod tests {
     fn text_y_is_baseline_not_top() {
         let f = Fonts::load().unwrap();
         // 上游布局把 y 当基线：size=28、y=59 的字块必须整体落在基线之上
-        let px = render(&json!({"elements":[{"type":"text","content":"工作搭子","x":16,"y":59,"size":28,"width_limit":340}]}), &f);
+        let px = render(
+            &json!({"elements":[{"type":"text","content":"工作搭子","x":16,"y":59,"size":28,"width_limit":340}]}),
+            &f,
+        );
         let rows: Vec<i32> = (0..300)
             .filter(|y| (0..400).any(|x| px[(y * 400 + x) as usize] < 200))
             .collect();
@@ -311,7 +348,9 @@ mod tests {
         let bottom = *rows.last().unwrap();
         // 允许少量下伸笔画（如「子」的竖钩）与抗锯齿，但绝不能是「以 y 为顶」的 59..90
         assert!(bottom <= 65, "字块主体必须落在基线附近，实际底边 {bottom}");
-        assert!(top >= 30 && top <= 40, "字块顶部应在基线上方约一个字号处，实际 {top}");
+        assert!(
+            top >= 30 && top <= 40,
+            "字块顶部应在基线上方约一个字号处，实际 {top}"
+        );
     }
 }
-

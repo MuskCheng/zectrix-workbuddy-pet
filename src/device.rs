@@ -4,7 +4,9 @@ use anyhow::Result;
 use zectrix_sdk::{AudioClip, Device, ImageFormat, OpenOptions};
 
 pub async fn open(target: Option<&str>) -> Result<Device> {
-    let target = target.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    let target = target
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
     Ok(Device::open(OpenOptions {
         target,
         client_name: Some("ZECTRIX Pet 4".into()),

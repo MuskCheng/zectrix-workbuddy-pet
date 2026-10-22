@@ -217,6 +217,14 @@ impl Model {
         if event.title.is_empty() {
             bail!("任务标题无有效字符")
         }
+        // 记录旧状态：花絮只在状态真正变了才换。同一个「等你处理」每 2 秒
+        // 被重复上报（等待期间事件持续产生）时，换花絮会让整屏反复刷新。
+        let task_id = event.task_id.clone();
+        let before = self
+            .tasks
+            .iter()
+            .find(|t| t.source == source && t.event.task_id == task_id)
+            .map(|t| t.status());
         if let Some(t) = self
             .tasks
             .iter_mut()
@@ -248,10 +256,20 @@ impl Model {
         self.tasks
             .sort_by_key(|t| std::cmp::Reverse((t.updated_at, t.event.seq)));
         self.tasks.truncate(100);
-        // WorkBuddy 有变动：右下角花絮换一条，下次推送时随画面一起更新。
-        // 只在被接受的事件上轮换，被 seq 规则拒绝的重放不会乱闪。
-        self.quip = next_quip(&self.quip);
+        // 状态真的变了才换花絮：同一状态的心跳/等待重复上报不再改动画面。
+        if before != Some(self.status_of(&task_id, source)) {
+            self.quip = next_quip(&self.quip);
+        }
         Ok(true)
+    }
+
+    /// 按 task_id 查当前状态（花絮轮换判定用）。
+    fn status_of(&self, task_id: &str, source: &str) -> Status {
+        self.tasks
+            .iter()
+            .find(|t| t.source == source && t.event.task_id == task_id)
+            .map(|t| t.status())
+            .unwrap_or(Status::Unknown)
     }
     pub fn visible(&self, now: i64) -> Vec<Task> {
         let mut tasks: Vec<_> = self

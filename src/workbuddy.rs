@@ -72,9 +72,7 @@ fn activity_label(name: &str) -> String {
         "read" | "view" | "readfile" | "openfile" | "readimage" => "正在阅读文件",
         "edit" | "write" | "multiedit" | "notebookedit" | "strreplace" | "createfile"
         | "editfile" | "writefile" => "正在修改文件",
-        "bash" | "powershell" | "shell" | "cmd" | "runcommand" | "executecommand" => {
-            "正在执行命令"
-        }
+        "bash" | "powershell" | "shell" | "cmd" | "runcommand" | "executecommand" => "正在执行命令",
         "grep" | "glob" | "search" | "searchdata" | "findfile" => "正在搜索代码",
         "websearch" | "webfetch" | "browser" | "fetchurl" => "正在查阅资料",
         "taskcreate" | "taskupdate" | "tasklist" | "taskget" | "todowrite" | "writetodos" => {
@@ -414,7 +412,8 @@ impl Cursor {
             // 权限确认卡在等：点明要回电脑点允许（提问题干优先级让位给它，
             // 否则上一问的残留文案会盖住权限提醒）。
             Status::Waiting
-                if self.permission_pending(now) || self.pending_kind.as_deref() == Some("permission") =>
+                if self.permission_pending(now)
+                    || self.pending_kind.as_deref() == Some("permission") =>
             {
                 "有写入操作等你确认 · 请回电脑点允许".to_string()
             }
@@ -669,11 +668,8 @@ impl Watcher {
             // 偏移跨进程重启恒定、随追加单调递增，天然幂等；
             // 而自增计数在重启后会从 1 重数与缓存里的旧序号撞车。
             let mut consumed = c.offset - chunk.len() as u64 - carry_before as u64;
-            let mut lines: Vec<Vec<u8>> = c
-                .carry
-                .split(|b| *b == b'\n')
-                .map(|s| s.to_vec())
-                .collect();
+            let mut lines: Vec<Vec<u8>> =
+                c.carry.split(|b| *b == b'\n').map(|s| s.to_vec()).collect();
             c.carry = lines.pop().unwrap_or_default(); // 末段可能是半行
             if skip_partial && !lines.is_empty() {
                 let dropped = lines.remove(0);
@@ -726,7 +722,9 @@ impl Watcher {
                         )
                     });
                 } else if c.settled(true) {
-                    if let Some(ev) = c.event(last_at.max(modified), last_seq.max(1), &fallback, &stem) {
+                    if let Some(ev) =
+                        c.event(last_at.max(modified), last_seq.max(1), &fallback, &stem)
+                    {
                         out.push(ev);
                     }
                 }
@@ -1004,7 +1002,9 @@ mod tests {
 
         append(
             &root,
-            &[json!({"type":"function_call_result","name":"AskUserQuestion","callId":"call-1","status":"completed","timestamp":1_700_000_003_000i64})],
+            &[
+                json!({"type":"function_call_result","name":"AskUserQuestion","callId":"call-1","status":"completed","timestamp":1_700_000_003_000i64}),
+            ],
         );
         let back = w.scan().unwrap();
         assert_eq!(back.len(), 1);
@@ -1026,7 +1026,11 @@ mod tests {
         );
         let evs = w.scan().unwrap();
         let statuses: Vec<_> = evs.iter().map(|(e, _)| e.status).collect();
-        assert_eq!(statuses, vec![Status::Done], "普通提问与失败工具都不得判等待");
+        assert_eq!(
+            statuses,
+            vec![Status::Done],
+            "普通提问与失败工具都不得判等待"
+        );
     }
 
     #[test]
@@ -1037,7 +1041,10 @@ mod tests {
         w.scan().unwrap();
         append(
             &root,
-            &[assistant("completed", 1_700_000_010_000i64), user("第二轮", 1_700_000_011_000)],
+            &[
+                assistant("completed", 1_700_000_010_000i64),
+                user("第二轮", 1_700_000_011_000),
+            ],
         );
         let evs = w.scan().unwrap();
         let ids: Vec<_> = evs.iter().map(|(e, _)| e.task_id.clone()).collect();
@@ -1071,13 +1078,17 @@ mod tests {
         // 同一类活动持续时不得重复发事件；活动变化才发。
         append(
             &root,
-            &[json!({"type":"function_call","name":"bash","callId":"b-2","timestamp":1_700_000_002_000i64})],
+            &[
+                json!({"type":"function_call","name":"bash","callId":"b-2","timestamp":1_700_000_002_000i64}),
+            ],
         );
         assert!(w.scan().unwrap().is_empty(), "同类活动不重发");
 
         append(
             &root,
-            &[json!({"type":"function_call","name":"Grep","callId":"g-1","timestamp":1_700_000_003_000i64})],
+            &[
+                json!({"type":"function_call","name":"Grep","callId":"g-1","timestamp":1_700_000_003_000i64}),
+            ],
         );
         let evs = w.scan().unwrap();
         assert_eq!(evs.last().unwrap().0.detail, "正在搜索代码");
@@ -1143,7 +1154,9 @@ mod tests {
         // 回答到达后回到工作态，提问内容不再占用 detail。
         append(
             &root,
-            &[json!({"type":"function_call_result","name":"AskUserQuestion","callId":"a-1","status":"completed","timestamp":1_700_000_002_000i64})],
+            &[
+                json!({"type":"function_call_result","name":"AskUserQuestion","callId":"a-1","status":"completed","timestamp":1_700_000_002_000i64}),
+            ],
         );
         let evs = w.scan().unwrap();
         let ev = &evs.last().unwrap().0;
@@ -1185,8 +1198,10 @@ mod tests {
         // 结果到达（用户点了允许）：立即回到工作态。
         append(
             &root,
-            &[json!({"type":"function_call_result","callId":"w-2","status":"completed",
-                     "timestamp":now * 1000})],
+            &[
+                json!({"type":"function_call_result","callId":"w-2","status":"completed",
+                     "timestamp":now * 1000}),
+            ],
         );
         let evs = w.scan().unwrap();
         assert_eq!(evs.last().unwrap().0.status, Status::Working);
@@ -1320,7 +1335,12 @@ mod tests {
         let path = root.join("c-Users-demo-proj").join("sess-0001.jsonl");
         let mut w = Watcher::new(root.clone());
         let mut f = std::fs::File::create(&path).unwrap();
-        write!(f, "{}", serde_json::to_string(&user("半行", 1_700_000_000_000)).unwrap()).unwrap();
+        write!(
+            f,
+            "{}",
+            serde_json::to_string(&user("半行", 1_700_000_000_000)).unwrap()
+        )
+        .unwrap();
         f.flush().unwrap();
         assert!(w.scan().unwrap().is_empty(), "半行不得产生事件");
         writeln!(f).unwrap();
@@ -1341,6 +1361,9 @@ mod tests {
         }
         assert!(m.current(1_700_000_020).is_some());
         m.settings.follow_enabled = false;
-        assert!(m.current(1_700_000_020).is_none(), "关闭跟随后本机任务不上屏");
+        assert!(
+            m.current(1_700_000_020).is_none(),
+            "关闭跟随后本机任务不上屏"
+        );
     }
 }

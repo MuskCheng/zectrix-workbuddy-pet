@@ -175,7 +175,11 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
     rect_r(&mut e, 326, 8, 58, 22, 7, Some(0));
     text_white(
         &mut e,
-        if model.demo.is_some() { "演示" } else { "实时" },
+        if model.demo.is_some() {
+            "演示"
+        } else {
+            "实时"
+        },
         341,
         24,
         14,
@@ -228,14 +232,13 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
     } else {
         let headline = t.as_ref().map(|t| t.label()).unwrap_or("等待任务");
         text(&mut e, headline, 20, 116, 22, 224);
-        let title =
-            t.as_ref()
-                .map(|t| t.event.title.as_str())
-                .unwrap_or(if model.settings.follow_enabled {
-                    "WorkBuddy 跟随已开启"
-                } else {
-                    "本机 WorkBuddy 跟随已关闭"
-                });
+        let title = t.as_ref().map(|t| t.event.title.as_str()).unwrap_or(
+            if model.settings.follow_enabled {
+                "WorkBuddy 跟随已开启"
+            } else {
+                "本机 WorkBuddy 跟随已关闭"
+            },
+        );
         for (line, title) in title_lines(title, 24, 3).iter().enumerate() {
             text(&mut e, title, 20, 146 + line as i32 * 21, 18, 220);
         }
@@ -245,7 +248,9 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
             .as_ref()
             .filter(|t| t.status() == Status::Waiting)
             .map(|t| t.event.detail.clone())
-            .filter(|d| !d.is_empty() && !d.starts_with("WorkBuddy 等待") && !d.starts_with("权限审批"));
+            .filter(|d| {
+                !d.is_empty() && !d.starts_with("WorkBuddy 等待") && !d.starts_with("权限审批")
+            });
         let detail = t
             .as_ref()
             .map(|t| {
@@ -293,10 +298,11 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
             text_white(&mut e, "请回到电脑确认", 30, 255, 14, 106);
         }
         // 需要人处理时不画进度区：那条指引才是这一刻唯一要说的事。
-        let progress = t
-            .as_ref()
-            .filter(|_| !needs_action)
-            .and_then(|t| t.event.progress.map(|p| (p, t.event.progress_source, t.event.progress_steps)));
+        let progress = t.as_ref().filter(|_| !needs_action).and_then(|t| {
+            t.event
+                .progress
+                .map(|p| (p, t.event.progress_source, t.event.progress_steps))
+        });
         match progress {
             Some((p, source, steps)) => {
                 rect(&mut e, 20, 228, 212, 13, None);
@@ -436,7 +442,10 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
     // 左下角：当前展示会话的上下文占用（读 WorkBuddy 的 session_usage.used/size）。
     // 选它的原因：本地精确可读、实时更新，且直接决定「还能聊多久」——
     // 云端积分余额本地拿不到，手填快照会失真，已下线。
-    let source = match t.as_ref().map(|t| (t.source.as_str(), t.event.agent.as_str())) {
+    let source = match t
+        .as_ref()
+        .map(|t| (t.source.as_str(), t.event.agent.as_str()))
+    {
         Some(("demo", _)) => "演示数据".to_string(),
         Some(("workbuddy", _)) => match ctx_label(model) {
             Some(label) => label,
@@ -572,7 +581,10 @@ mod tests {
         .unwrap();
         let v = draw(&m, 2, 0);
         let s = v.to_string();
-        assert!(s.contains("当前实施状态：正在执行命令"), "进度区应显示活动描述");
+        assert!(
+            s.contains("当前实施状态：正在执行命令"),
+            "进度区应显示活动描述"
+        );
         assert!(s.contains("持续跟踪任务执行"), "detail 行不应与进度区重复");
         assert!(!s.contains('%'), "无清单时不得出现百分比");
 
@@ -611,13 +623,19 @@ mod tests {
         let s = draw(&m, 2, 0).to_string();
         assert!(s.contains("WorkBuddy 本机"), "无上下文数据回退原标签");
         assert!(!s.contains("上下选任务"), "按键提示已下线");
-        assert!(crate::model::quip_pool().contains(&m.quip.as_str()), "花絮必须来自短语池");
+        assert!(
+            crate::model::quip_pool().contains(&m.quip.as_str()),
+            "花絮必须来自短语池"
+        );
 
         // 有上下文数据时左下角换成占用百分比与剩余，右下角显示花絮。
         m.ctx_used = Some(119222);
         m.ctx_size = Some(300000);
         let s = draw(&m, 2, 0).to_string();
-        assert!(s.contains("上下文 40% · 剩 181K"), "左下角应显示上下文占用：{s}");
+        assert!(
+            s.contains("上下文 40% · 剩 181K"),
+            "左下角应显示上下文占用：{s}"
+        );
         assert!(s.contains(&m.quip), "右下角应显示花絮短语");
     }
 

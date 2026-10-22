@@ -4,17 +4,17 @@
 //! 本机光栅化 + zectrix-sdk 局域网直连，并把 Codex 会话跟随换成 WorkBuddy 跟随。
 
 use anyhow::{Context, Result};
-use workbuddy_pet::{
-    device, layout,
-    model::{Event as TaskEvent, Model, Status},
-    raster::{self, Fonts},
-    sound,
-    workbuddy::Watcher,
-};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use workbuddy_pet::{
+    device, layout,
+    model::{Event as TaskEvent, Model, Status, Task},
+    raster::{self, Fonts},
+    sound,
+    workbuddy::Watcher,
+};
 use zectrix_sdk::{Device, ImageFormat};
 
 fn now() -> i64 {
@@ -197,7 +197,11 @@ fn cmd_autostart(args: &Args) -> Result<()> {
             );
             println!(
                 "WorkBuddy 进程：{}",
-                if workbuddy_running() { "正在运行" } else { "未运行" }
+                if workbuddy_running() {
+                    "正在运行"
+                } else {
+                    "未运行"
+                }
             );
         }
         other => anyhow::bail!("未知动作 {other}，可用 on / off / status"),
@@ -214,6 +218,10 @@ struct Store {
     target: Option<String>,
     #[serde(default = "default_format")]
     format: String,
+    /// 已经提醒过的指纹（见 `sound::notice_sig`）。持久化是为了让「补提醒」
+    /// 在设备超时重连、守护重启后依然不重复响——同一次等待只吵人一次。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    announced: Option<String>,
 }
 
 fn default_format() -> String {
@@ -226,6 +234,7 @@ impl Default for Store {
             model: Model::default(),
             target: None,
             format: default_format(),
+            announced: None,
         }
     }
 }
@@ -265,6 +274,11 @@ fn save_store(store: &Store) -> Result<()> {
         }
         if out.format == default_format() && disk.format != default_format() {
             out.format = disk.format;
+        }
+        // 提醒指纹是「谁先响过谁说了算」：内存里为空说明这次进程还没响过，
+        // 沿用磁盘上的，避免守护重启后把同一条等待又响一遍。
+        if out.announced.is_none() {
+            out.announced = disk.announced;
         }
     }
     let tmp = path.with_extension("json.tmp");
@@ -335,7 +349,9 @@ fn parse_status(value: &str) -> Result<Option<Status>> {
         "error" => Some(Status::Error),
         "stopped" | "stop" => Some(Status::Stopped),
         "unknown" => Some(Status::Unknown),
-        other => anyhow::bail!("未知状态 {other}，可用 working / waiting / done / error / stopped / unknown / idle"),
+        other => anyhow::bail!(
+            "未知状态 {other}，可用 working / waiting / done / error / stopped / unknown / idle"
+        ),
     })
 }
 
@@ -350,7 +366,8 @@ fn read_contexts() -> std::collections::HashMap<String, (u32, u32)> {
     use std::time::{Duration, Instant};
     type Map = std::collections::HashMap<String, (u32, u32)>;
     static CACHE: std::sync::OnceLock<Mutex<(Instant, Map)>> = std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new((Instant::now() - Duration::from_secs(3600), Map::new())));
+    let cache =
+        CACHE.get_or_init(|| Mutex::new((Instant::now() - Duration::from_secs(3600), Map::new())));
     let Ok(mut guard) = cache.lock() else {
         return Map::new();
     };
@@ -422,7 +439,9 @@ fn scan_into(model: &mut Model, watcher: &mut Watcher) -> (Vec<TaskEvent>, bool)
         Some((u, s)) => (Some(u), Some(s)),
         None => (None, None),
     };
-    let pct = |u: Option<u32>, s: Option<u32>| u.zip(s).map(|(u, s)| (u as f32 / s as f32 * 100.0) as i32);
+    let pct = |u: Option<u32>, s: Option<u32>| {
+        u.zip(s).map(|(u, s)| (u as f32 / s as f32 * 100.0) as i32)
+    };
     if pct(model.ctx_used, model.ctx_size) != pct(used, size) {
         changed = true;
     }
@@ -476,12 +495,15 @@ async fn scan_and_report(
         // 同一批记录里可能先出现「完成」又立刻回到「工作」（上一轮完成记录
         // 延迟补写的场景），提示音只认每个任务的最终状态，中间态不响铃。
         let is_final = !events[i + 1..].iter().any(|e| e.task_id == ev.task_id);
-        if allow_chime
-            && is_final
-            && model.settings.sound_enabled
-            && sound::transition(previous, ev.status)
-        {
-            chime(dev, ev.status, model.settings.volume).await;
+        if is_final && sound::should_chime(allow_chime, previous, ev.status) {
+            let target = model
+                .tasks
+                .iter()
+                .find(|t| t.source == "workbuddy" && t.event.task_id == ev.task_id)
+                .cloned();
+            if let Some(task) = target {
+                announce(dev, model, store, &task).await;
+            }
         }
     }
     changed
@@ -537,9 +559,7 @@ fn describe(model: &Model) -> String {
             out.push_str(&format!("来源：{}", t.source));
             if let Some(p) = t.event.progress {
                 match t.event.progress_steps {
-                    Some((done, total)) => {
-                        out.push_str(&format!(" · 清单 {done}/{total}（{p}%）"))
-                    }
+                    Some((done, total)) => out.push_str(&format!(" · 清单 {done}/{total}（{p}%）")),
                     None => out.push_str(&format!(" · 上报进度 {p}%")),
                 }
             }
@@ -555,9 +575,21 @@ fn describe(model: &Model) -> String {
         "进行中/等待：{} 个｜已知任务：{} 个｜跟随：{}｜动画：{}｜提示音：{}（音量 {}）\n",
         running.len(),
         model.tasks.len(),
-        if model.settings.follow_enabled { "开" } else { "关" },
-        if model.settings.animation { "开" } else { "关" },
-        if model.settings.sound_enabled { "开" } else { "关" },
+        if model.settings.follow_enabled {
+            "开"
+        } else {
+            "关"
+        },
+        if model.settings.animation {
+            "开"
+        } else {
+            "关"
+        },
+        if model.settings.sound_enabled {
+            "开"
+        } else {
+            "关"
+        },
         model.settings.volume
     ));
     out
@@ -742,10 +774,22 @@ async fn cmd_init(args: &Args) -> Result<()> {
     );
     println!(
         "当前设置      跟随 {}｜提示音 {}（音量 {}）｜动画 {}｜格式 {}",
-        if store.model.settings.follow_enabled { "开" } else { "关" },
-        if store.model.settings.sound_enabled { "开" } else { "关" },
+        if store.model.settings.follow_enabled {
+            "开"
+        } else {
+            "关"
+        },
+        if store.model.settings.sound_enabled {
+            "开"
+        } else {
+            "关"
+        },
         store.model.settings.volume,
-        if store.model.settings.animation { "开" } else { "关" },
+        if store.model.settings.animation {
+            "开"
+        } else {
+            "关"
+        },
         store.format
     );
 
@@ -819,7 +863,11 @@ async fn cmd_init(args: &Args) -> Result<()> {
     let path = out_dir().join("pet-init.png");
     write_png(&path, &png)?;
     print!("{}", describe(&store.model));
-    println!("  预览图：{}（400×300，{} 字节）", path.display(), png.len());
+    println!(
+        "  预览图：{}（400×300，{} 字节）",
+        path.display(),
+        png.len()
+    );
 
     if let Some(d) = dev {
         if confirm("  先打开上面的预览确认版式，然后把它推到设备？") {
@@ -848,9 +896,7 @@ async fn cmd_init(args: &Args) -> Result<()> {
 
     println!(
         "\n初始化结束。日常使用：`workbuddy-pet watch{}`",
-        target
-            .map(|t| format!(" --target {t}"))
-            .unwrap_or_default()
+        target.map(|t| format!(" --target {t}")).unwrap_or_default()
     );
     Ok(())
 }
@@ -860,7 +906,10 @@ async fn cmd_push(args: &Args) -> Result<()> {
     let model = with_model(args, &mut store);
     let fmt = device::format(args.get("format").unwrap_or(&store.format))?;
     let png = render(&model, 0)?;
-    let target = args.get("target").map(str::to_string).or(store.target.clone());
+    let target = args
+        .get("target")
+        .map(str::to_string)
+        .or(store.target.clone());
     print!("{}", describe(&model));
 
     let dev = device::open(target.as_deref()).await?;
@@ -871,7 +920,11 @@ async fn cmd_push(args: &Args) -> Result<()> {
     let result = dev.show_with_format(&png, fmt).await;
     let closed = dev.close().await;
     match result {
-        Ok(()) => println!("设备已完成显示（{}，{} 字节 PNG）", device::format_name(fmt), png.len()),
+        Ok(()) => println!(
+            "设备已完成显示（{}，{} 字节 PNG）",
+            device::format_name(fmt),
+            png.len()
+        ),
         Err(zectrix_sdk::Error::ResultUnknown) => {
             println!("设备未确认本次显示结果（ResultUnknown）：按 SDK 约定不重试、不重复刷图，请在设备上目检。");
         }
@@ -906,12 +959,40 @@ fn write_wav(path: &Path, samples: &[i16], rate: u32) -> Result<()> {
     Ok(())
 }
 
-async fn chime(dev: &zectrix_sdk::Device, status: Status, volume: u8) {
+async fn chime(dev: &zectrix_sdk::Device, status: Status, volume: u8) -> bool {
     let audio = device::clip(&sound::pcm(status));
     match dev.play(&audio, volume).await {
-        Ok(_) => println!("提示音：已播放（{}）", status.label()),
+        Ok(_) => {
+            println!("提示音：已播放（{}）", status.label());
+            true
+        }
         // 播放失败不重试，切回前台也不补响。
-        Err(e) => eprintln!("提示音播放失败（不重试）: {e}"),
+        Err(e) => {
+            eprintln!("提示音播放失败（不重试）: {e}");
+            false
+        }
+    }
+}
+
+/// 为某个任务提醒一次，并把指纹记到磁盘。
+/// 指纹相同就跳过：等待页每 2 秒被重复上报时不会反复响，设备超时重连后
+/// 也不会把同一条等待再响一遍；换一张确认卡、换一个提问则指纹不同，会再响。
+async fn announce(dev: &Device, model: &Model, store: &mut Store, task: &Task) {
+    if !model.settings.sound_enabled {
+        return;
+    }
+    let Some(sig) = sound::notice_sig(task) else {
+        return;
+    };
+    if store.announced.as_deref() == Some(sig.as_str()) {
+        return;
+    }
+    // 只有真的响出来才记指纹：播放失败（设备忙、音频通路未就绪）留到下次补。
+    if chime(dev, task.status(), model.settings.volume).await {
+        store.announced = Some(sig);
+        if let Err(e) = save_store(store) {
+            eprintln!("配置保存失败: {e}");
+        }
     }
 }
 
@@ -934,7 +1015,10 @@ async fn cmd_run(args: &Args) -> Result<()> {
             save_store(&store)?;
         }
     }
-    let target = args.get("target").map(str::to_string).or(store.target.clone());
+    let target = args
+        .get("target")
+        .map(str::to_string)
+        .or(store.target.clone());
     let mut model = store.model.clone();
     let mut watcher = Watcher::new(workbuddy_root());
     let fonts = Fonts::load()?;
@@ -948,7 +1032,10 @@ async fn cmd_run(args: &Args) -> Result<()> {
         device::format_name(fmt)
     );
     if let Ok(s) = dev.status().await {
-        println!("电量 {:?}% | RSSI {:?} dBm", s.battery_percent, s.wifi_rssi_dbm);
+        println!(
+            "电量 {:?}% | RSSI {:?} dBm",
+            s.battery_percent, s.wifi_rssi_dbm
+        );
     }
 
     let watch = args.has("exit-with-workbuddy");
@@ -961,6 +1048,17 @@ async fn cmd_run(args: &Args) -> Result<()> {
     scan_and_report(&mut model, &mut watcher, &mut store, &dev, false).await;
     if push_if_changed(&dev, &model, &fonts, fmt, frame, &mut last_sig).await {
         frame = (frame + 1) % 6;
+    }
+    // 首扫静默是为了不把历史回放当成新提醒，但如果此刻屏幕上正停在「等你处理」，
+    // 那是一次真正的漏报——设备超时重连、守护重启都会走到这里，等待页会无声出现。
+    // 这里补一次提醒；同一提示只响一次（指纹落盘），所以反复重连不会反复响。
+    // 完成态只在刚发生（1 分钟内）时补，避免重启后把几小时前的结果当新闻播一遍。
+    if let Some(task) = model.current(now()) {
+        let status = task.status();
+        let fresh = now().saturating_sub(task.updated_at) <= 60;
+        if status == Status::Waiting || (status == Status::Done && fresh) {
+            announce(&dev, &model, &mut store, &task).await;
+        }
     }
 
     let outcome = loop {
@@ -1108,7 +1206,8 @@ async fn cmd_sound(args: &Args) -> Result<()> {
     let dev = device::open(target.as_deref()).await?;
     println!(
         "已连接: id={} addr={}｜播放 {} 提示音（音量 {volume}%）",
-        dev.summary.id, dev.summary.address,
+        dev.summary.id,
+        dev.summary.address,
         status.label()
     );
     // 实测连接后立刻发音频会被设备以结果码 4 拒绝；留出音频通路初始化时间。
@@ -1194,7 +1293,9 @@ async fn main() {
             let path = state_path();
             match std::fs::remove_file(&path) {
                 Ok(()) => println!("已删除 {}", path.display()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("没有已保存的状态。"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    println!("没有已保存的状态。")
+                }
                 Err(e) => eprintln!("删除失败: {e}"),
             }
             Ok(())
