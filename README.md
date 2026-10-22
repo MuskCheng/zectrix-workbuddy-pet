@@ -195,13 +195,15 @@
 
 ## 开发
 
-```bat
+```powershell
 cargo fmt
-set CMAKE_POLICY_VERSION_MINIMUM=3.5
+$env:CMAKE_POLICY_VERSION_MINIMUM = '3.5'
 cargo clippy --locked --release --all-targets
 cargo test --locked --release
 cargo build --locked --release
 ```
+
+一键装好并跑完这些的是 `scripts\install.ps1`（`-SkipTests` 可跳过测试）。
 
 51 项测试（状态机、标题解析、去抖、占用判定、版式、提示音、花絮定位；另 1 项真机探针需
 WorkBuddy 正在运行，默认忽略）。模块分工：
