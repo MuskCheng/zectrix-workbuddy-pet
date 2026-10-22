@@ -1,0 +1,18 @@
+[package]
+name = "workbuddy-pet"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "ZECTRIX Note 4 像素宠物：跟随本机 WorkBuddy 会话状态，经 zectrix-sdk 局域网直连推送"
+
+[dependencies]
+zectrix-sdk = { path = "../zectrix-local-push-sdk" }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+fontdue = "0.9"
+image = { version = "0.25", default-features = false, features = ["png"] }
+# 只读 WorkBuddy 的 ~/.workbuddy/workbuddy.db（session_usage.credit_json）取积分消耗
+rusqlite = { version = "0.32", features = ["bundled"] }
