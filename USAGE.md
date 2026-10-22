@@ -69,7 +69,9 @@ workbuddy-pet push   [--demo 状态] [--format gray16|gray4|mono]
 workbuddy-pet run    [--standby] [--volume 0-100] [--no-sound] [--no-animation]
                                                  常驻：跟随状态、按键翻页、提示音
 workbuddy-pet watch  [--idle-grace 300]          守护：待命不占设备，有任务才占用（推荐日常）
-workbuddy-pet autostart on|off|status            开机自启：写启动文件夹，后台待命
+workbuddy-pet supervise                          看门狗：常驻，守护不在就补一份（登录自启跑的就是它）
+workbuddy-pet ensure  [--verbose]                一次性检查：守护不在就拉起（幂等）
+workbuddy-pet autostart on|off|status            登录自启；on 会装副本、起看门狗、立即生效
 workbuddy-pet where                              配置与输出路径
 workbuddy-pet forget                             删除本机状态缓存
 ```
@@ -104,14 +106,24 @@ workbuddy-pet forget                             删除本机状态缓存
 workbuddy-pet autostart on --target 192.168.1.100
 ```
 
-它做三件事：
+它做四件事：
 
-1. 在 `%APPDATA%\...\Startup\zectrix-workbuddy-pet.vbs` 放自启项（隐藏窗口，不弹黑框）
-2. 生成 `%LOCALAPPDATA%\zectrix-workbuddy-pet\watch.cmd`（含设备 IP，日志写同目录 `watch.log`）
-3. 把目标 IP 存进 `state.json`
+1. 把当前 exe 复制到 `%LOCALAPPDATA%\zectrix-workbuddy-pet\bin\workbuddy-pet.exe`，
+   自启项指向这份**副本**而不是构建目录（`cargo clean` 不会把它弄丢）
+2. 在 `%APPDATA%\...\Startup\zectrix-workbuddy-pet.vbs` 放自启项，隐藏窗口启动 `supervise`
+3. 立刻拉起看门狗（不必等下次登录），看门狗再拉起守护，有任务就开始推送
+4. 把目标 IP 存进 `state.json`
 
-之后登录 Windows 就在后台待命。想立刻生效不必重启：`workbuddy-pet watch`
-（或双击 `watch.cmd`）。
+**为什么登录项拉起的是看门狗、不是守护本身**：启动文件夹每次登录只执行一次。守护被
+任务管理器结束、被新版本覆盖、或者登录项装好之后根本没重新登录过，都会出现「WorkBuddy
+在跑、设备却没人推」——而且没有任何东西会把它补回来。所以常驻的是看门狗：
+
+- 看门狗每 10 秒看一眼守护的心跳（`daemon.hb`，守护每 5 秒写一次）
+- 心跳过期就重新拉起守护，实测**杀掉守护后约 20 秒自动恢复**
+- 守护自己写 `daemon.lock`（PID）做单实例，两份同时被拉起时后来者退出
+
+`autostart status` 会分别报看门狗与守护的 PID 和心跳年龄；`autostart off` 先停看门狗
+再停守护（顺序反了会被立刻补回来），并移除登录项。
 
 推送节流：每 2 秒扫一次会话，只有状态、标题、进度或选中项真的变了才刷屏；
 没有变化一帧都不发。`animation` 关闭时画面完全静止，仅状态变化或手动翻页才更新。
@@ -176,20 +188,24 @@ Agent 提问或权限确认卡在等时，设备显示**题干 + 一条框起来
 - `state.json`：设置、最近 100 条任务、设备地址、已提醒指纹；升级保留。
 - `out\pet-*.png`：`preview` / `init` 渲染的预览图。
 - `out\recordings\*.wav`：设备长按确认键录制的音频（16 kHz 单声道 PCM16）。
-- `watch.log`：守护输出。
+- `watch.log`：守护与看门狗输出（超过 1 MB 在下次启动时清空）。
+- `bin\workbuddy-pet.exe`：自启用的副本，`autostart on` 时复制。
+- `daemon.hb` / `watchdog.hb` / `daemon.lock`：心跳与单实例锁，用于判断谁在运行；可随时删除。
 
 `state.json` 含设备地址，不要分享；卸载用 `workbuddy-pet forget` 删除。
 
 ## 启动 / 停止 / 卸载 / 更新
 
-- **启动**：`workbuddy-pet watch`（后台跟随，可配 `autostart on`）；临时用一次就
+- **启动**：`workbuddy-pet watch`（前台跟随，可配 `autostart on` 常驻）；临时用一次就
   `workbuddy-pet run`。
-- **停止**：`Ctrl+C`——向设备发送 `close()`、保存状态后退出，不自动重连。
-  后台守护用任务管理器结束 `workbuddy-pet.exe`（强杀后设备约 15 秒才释放租约，属固件行为）。
+- **停止**：前台 `Ctrl+C`——向设备发送 `close()`、保存状态后退出，不自动重连。
+  后台用 `workbuddy-pet autostart off`（先停看门狗再停守护，否则 10 秒内会被补回来）。
+  在任务管理器里强行结束守护也可以，看门狗约 20 秒后会再拉起一份——要真正停就得用 `off`。
 - **卸载**：`workbuddy-pet autostart off` → `workbuddy-pet forget` → 删除本项目目录与
   `%LOCALAPPDATA%\zectrix-workbuddy-pet`；不触碰 WorkBuddy 与设备上的任何数据。
 - **更新**：`cd ..\zectrix-local-push-sdk && git pull`，再回本项目
-  `cargo build --locked --release`；状态缓存保留。
+  `cargo build --locked --release`，最后用新 exe 跑一次 `autostart on`（它会把副本换成
+  新版本并重启看门狗）；状态缓存保留。
 
 ## 已知边界
 

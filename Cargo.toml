@@ -1,6 +1,6 @@
 [package]
 name = "workbuddy-pet"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "ZECTRIX Note 4 像素宠物：跟随本机 WorkBuddy 会话状态，经 zectrix-sdk 局域网直连推送"
@@ -24,4 +24,4 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # 推送时刻从 WorkBuddy 窗口读「准备中」那行花絮（UI Automation）。
 # 该文案只在渲染进程内存里，磁盘上没有副本，只能走界面读。
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Com"] }
+windows = { version = "0.58", features = ["Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_Com", "Win32_System_Threading"] }

@@ -98,48 +98,280 @@ fn watch_script() -> PathBuf {
     data_dir().join("watch.cmd")
 }
 
+/// 自启、计划任务统一指向这份副本：`target\release` 会被 `cargo clean` 抹掉，
+/// 拿构建目录当安装目录，早晚会出现「自启项还在、exe 没了」的静默失效。
+fn guard_bin() -> PathBuf {
+    data_dir().join("bin").join("workbuddy-pet.exe")
+}
+
+fn heartbeat_path() -> PathBuf {
+    data_dir().join("daemon.hb")
+}
+
+fn lock_path() -> PathBuf {
+    data_dir().join("daemon.lock")
+}
+
+fn supervise_heartbeat_path() -> PathBuf {
+    data_dir().join("watchdog.hb")
+}
+
+/// 停用标记：`autostart off` 时先落这个文件，`watch.cmd` 的循环看到它就退出。
+/// 否则 `off` 杀掉守护后，那个每 10 秒重启一次的批处理还会把它拉回来。
+fn stop_flag() -> PathBuf {
+    data_dir().join("stopped.flag")
+}
+
+/// 心跳多久算新鲜。守护每 5 秒写一次，留 4 倍余量，避免一次磁盘抖动误判为死。
+const HEARTBEAT_FRESH: i64 = 20;
+
+/// 看门狗 10 秒一次检查，留同样的余量。
+const SUPERVISE_FRESH: i64 = 40;
+
+/// 心跳文件内容：第一行 PID，第二行时间戳。
+fn parse_heartbeat(text: &str) -> Option<(u32, i64)> {
+    let mut it = text.lines();
+    let pid = it.next()?.trim().parse().ok()?;
+    let ts = it.next()?.trim().parse().ok()?;
+    Some((pid, ts))
+}
+
+fn write_heartbeat() {
+    let body = format!("{}\n{}", std::process::id(), now());
+    // 心跳写失败不影响推送：它只用于「有没有守护在跑」的判断。
+    let _ = std::fs::write(heartbeat_path(), body);
+}
+
+fn write_supervise_heartbeat() {
+    let body = format!("{}\n{}", std::process::id(), now());
+    let _ = std::fs::write(supervise_heartbeat_path(), body);
+}
+
+/// 心跳是否够新。这条路径被看门狗每 10 秒走一次，所以不查进程表——
+/// 只看时间戳，避免每 10 秒拉起一次 tasklist。真正的「进程还在不在」由
+/// `daemon.lock` 里的 PID 在启动时判定。
+fn heartbeat_fresh(path: &Path, fresh: i64) -> Option<(u32, i64)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let (pid, ts) = parse_heartbeat(&text)?;
+    (now() - ts <= fresh).then_some((pid, ts))
+}
+
+fn guard_alive() -> bool {
+    heartbeat_fresh(&heartbeat_path(), HEARTBEAT_FRESH).is_some()
+}
+
+fn supervise_alive() -> bool {
+    heartbeat_fresh(&supervise_heartbeat_path(), SUPERVISE_FRESH).is_some()
+}
+
+/// 更严格的一份判断：心跳新鲜 **且** 该 PID 确实是本程序。
+/// 给一次性命令用（`autostart on/status`、`ensure`）——这些场景几十毫秒不算贵，
+/// 但结论必须准：刚被结束的进程心跳还会新鲜 20 秒，只看心跳会误报「在运行」。
+fn process_running(path: &Path, fresh: i64) -> bool {
+    match heartbeat_fresh(path, fresh) {
+        Some((pid, _)) => pid_is_ours(pid),
+        None => false,
+    }
+}
+
+fn guard_running() -> bool {
+    process_running(&heartbeat_path(), HEARTBEAT_FRESH)
+}
+
+fn supervise_running() -> bool {
+    process_running(&supervise_heartbeat_path(), SUPERVISE_FRESH)
+}
+
+/// 该 PID 是否确实是本程序。只在启动抢锁与 `autostart off` 时调用，频率很低，
+/// 所以用 tasklist 而不是引入更多 Win32 依赖。
+#[cfg(windows)]
+fn pid_is_ours(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let Ok(out) = std::process::Command::new("tasklist")
+        .args(["/NH", "/FI", &format!("PID eq {pid}")])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .to_ascii_lowercase()
+        .contains("workbuddy-pet.exe")
+}
+
+#[cfg(not(windows))]
+fn pid_is_ours(_pid: u32) -> bool {
+    false
+}
+
+/// 抢占单实例锁：锁里记着真正在跑的那份的 PID。
+/// 上一份是崩溃退出的（PID 已消失）就接管，避免 watch.cmd 重启时被自己的
+/// 旧锁挡在门外；真有两份同时活着则后来者退出。
+fn claim_instance() -> bool {
+    if let Ok(text) = std::fs::read_to_string(lock_path()) {
+        if let Some((pid, _)) = parse_heartbeat(&text) {
+            if pid != std::process::id() && pid_is_ours(pid) {
+                return false;
+            }
+        }
+    }
+    let _ = std::fs::write(
+        lock_path(),
+        format!("{}\n{}", std::process::id(), now()),
+    );
+    true
+}
+
+/// 结束某个 PID（`autostart off` 用）。仅当它确实是本程序才动手，
+/// 否则心跳里的旧 PID 被系统复用时会误杀别人的进程。
+fn stop_pid(pid: u32) -> bool {
+    if !pid_is_ours(pid) {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+        unsafe {
+            let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) else {
+                return false;
+            };
+            let ok = TerminateProcess(handle, 0).is_ok();
+            let _ = CloseHandle(handle);
+            ok
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// 停掉守护与看门狗。**先停看门狗**，否则它会在 10 秒内把守护再拉起来。
+fn stop_running() {
+    for path in [supervise_heartbeat_path(), heartbeat_path()] {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Some((pid, _)) = parse_heartbeat(&text) {
+                if stop_pid(pid) {
+                    println!("已结束进程 pid {pid}");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    let _ = std::fs::remove_file(lock_path());
+}
+
+/// 拉起守护：优先走 `watch.cmd`（它自带 10 秒重启循环，崩溃能自愈），
+/// 没有脚本时直接起本进程的 `watch`。两种方式都在后台、无窗口、脱离当前会话。
+/// 常驻进程一律用已安装副本：从 `target\release` 里跑起来的那份，
+/// 会在 `cargo clean` 后变成指向空气的进程。
+fn installed_exe() -> PathBuf {
+    let bin = guard_bin();
+    if bin.is_file() {
+        bin
+    } else {
+        std::env::current_exe().unwrap_or(bin)
+    }
+}
+
+fn append_log() -> Result<(std::fs::File, std::fs::File)> {
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(data_dir().join("watch.log"))?;
+    let err = log.try_clone()?;
+    Ok((log, err))
+}
+
+fn detach(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW 不弹黑框；DETACHED_PROCESS 让子进程不随当前控制台/父进程退出。
+        cmd.creation_flags(0x0800_0000 | 0x0000_0008);
+    }
+}
+
+fn start_guard() -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    std::fs::create_dir_all(data_dir())?;
+    let (log, err) = append_log()?;
+    let mut cmd = Command::new(installed_exe());
+    cmd.arg("watch").stdin(Stdio::null()).stdout(log).stderr(err);
+    if let Some(t) = load_store().target {
+        cmd.arg("--target").arg(t);
+    }
+    detach(&mut cmd);
+    cmd.spawn().context("拉起守护进程失败")?;
+    Ok(())
+}
+
+/// 拉起看门狗（常驻，发现守护不在就补一份）。
+fn start_supervise() -> Result<()> {
+    use std::process::{Command, Stdio};
+    std::fs::create_dir_all(data_dir())?;
+    let (log, err) = append_log()?;
+    let mut cmd = Command::new(installed_exe());
+    cmd.arg("supervise")
+        .stdin(Stdio::null())
+        .stdout(log)
+        .stderr(err);
+    detach(&mut cmd);
+    cmd.spawn().context("拉起看门狗失败")?;
+    Ok(())
+}
+
 fn write_autostart(target: Option<&str>) -> Result<()> {
-    let exe = std::env::current_exe().context("无法定位 workbuddy-pet.exe")?;
+    let current = std::env::current_exe().context("无法定位 workbuddy-pet.exe")?;
     let log = data_dir().join("watch.log");
     std::fs::create_dir_all(data_dir())?;
-    // 批处理与 VBS 一律写成纯 ASCII：cmd 按本地 OEM 代码页解析，中文注释会乱码。
-    // workbuddy-pet 自身异常退出时由循环在 10 秒后拉起，不需要额外的进程守护；
-    // ping 代替 timeout，因为隐藏窗口下 timeout 依赖交互输入会直接报错。
-    let command = format!(
-        ":loop\r\n\
-         \"{exe}\" watch{args} >> \"%LOG%\" 2>&1\r\n\
-         ping -n 11 127.0.0.1 >nul\r\n\
-         goto loop\r\n",
-        exe = exe.display(),
-        args = target
-            .filter(|t| !t.trim().is_empty())
-            .map(|t| format!(" --target {t}"))
-            .unwrap_or_default(),
-    );
-    let script = format!(
-        "@echo off\r\n\
-         rem Generated by \"workbuddy-pet autostart on\": follow WorkBuddy and push status.\r\n\
-         set \"LOG={log}\"\r\n\
-         if exist \"%LOG%\" for %%F in (\"%LOG%\") do if %%~zF GTR 1048576 del \"%LOG%\"\r\n\
-         {command}",
-        log = log.display()
-    );
-    std::fs::write(watch_script(), script)?;
+    // 旧版本用 watch.cmd + stopped.flag 做自愈，现在由看门狗接管，删掉以免残留生效。
+    let _ = std::fs::remove_file(watch_script());
+    let _ = std::fs::remove_file(stop_flag());
+
+    // 自启项指向这份副本，不指向构建目录：`cargo clean`、换仓库位置
+    // 都会让指向 target\release 的自启项变成「还在，但一启动就找不到 exe」。
+    let installed = guard_bin();
+    let mut exe = current.clone();
+    if current != installed {
+        if let Some(dir) = installed.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        match std::fs::copy(&current, &installed) {
+            Ok(_) => exe = installed.clone(),
+            Err(e) if installed.is_file() => {
+                // 副本正在被守护用着，Windows 不允许覆盖——沿用旧副本，提示怎么升级。
+                eprintln!("无法覆盖已安装副本（{e}），继续使用 {}", installed.display());
+                eprintln!("要换版本：先 `workbuddy-pet autostart off` 或结束守护，再执行一次 on。");
+                exe = installed.clone();
+            }
+            Err(e) => {
+                eprintln!("复制 exe 到 {} 失败（{e}），自启将指向 {}", installed.display(), current.display());
+            }
+        }
+    }
+
     let entry = autostart_entry().context("找不到启动文件夹（%APPDATA%）")?;
+    // 登录时拉起的是**看门狗**而不是守护本身：看门狗常驻，发现守护不在就补一份，
+    // 所以守护被结束、或被更新覆盖后，不用等下一次登录就能回来。
     let vbs = format!(
-        "' Generated by \"workbuddy-pet autostart on\": run watch.cmd hidden at login.\r\n\
-         CreateObject(\"WScript.Shell\").Run \"\"\"{}\"\"\", 0, False\r\n",
-        watch_script().display()
+        "' Generated by \"workbuddy-pet autostart on\": start the watchdog hidden at login.\r\n\
+         CreateObject(\"WScript.Shell\").Run \"\"\"{}\"\" supervise\", 0, False\r\n",
+        exe.display()
     );
     std::fs::write(&entry, vbs)?;
+
     if let Some(t) = target.filter(|t| !t.trim().is_empty()) {
         // 记住目标，之后 info/status 与自动发现都不会因为没带参数而失效。
         let mut store = load_store();
         store.target = Some(t.to_string());
         save_store(&store)?;
     }
-    println!("已设置开机自启：{}", entry.display());
-    println!("守护脚本：{}", watch_script().display());
+    println!("已设置自启：{}", entry.display());
+    println!("守护程序：{}", exe.display());
     println!("日志：{}", log.display());
     Ok(())
 }
@@ -152,11 +384,10 @@ fn clear_autostart() -> Result<()> {
             Err(e) => return Err(e.into()),
         }
     }
-    match std::fs::remove_file(watch_script()) {
-        Ok(()) => println!("已删除守护脚本。"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-    }
+    // 顺序要紧：看门狗先停，否则它会在 10 秒内把守护再拉起来。
+    stop_running();
+    let _ = std::fs::remove_file(watch_script());
+    println!("已停止看门狗与守护进程。");
     Ok(())
 }
 
@@ -171,7 +402,13 @@ fn cmd_autostart(args: &Args) -> Result<()> {
     match action.as_str() {
         "on" | "enable" | "install" => {
             write_autostart(target.as_deref())?;
-            println!("下次登录 Windows 时会自动在后台等待 WorkBuddy；现在想立刻生效可运行 workbuddy-pet watch。");
+            // 装完立刻起来，别让用户等到下次登录——「跟随 WorkBuddy」不该有这段空窗。
+            if supervise_running() {
+                println!("看门狗已在运行，未重复启动。");
+            } else {
+                start_supervise()?;
+                println!("已立即启动看门狗；它会维持守护，WorkBuddy 一出现即可跟随。");
+            }
         }
         "off" | "disable" | "uninstall" => clear_autostart()?,
         "status" => {
@@ -184,13 +421,35 @@ fn cmd_autostart(args: &Args) -> Result<()> {
                 }
             );
             println!(
-                "守护脚本：{}",
-                if watch_script().exists() {
-                    watch_script().display().to_string()
+                "守护程序：{}",
+                if guard_bin().is_file() {
+                    guard_bin().display().to_string()
                 } else {
-                    "未生成".into()
+                    "未安装（尚未执行 autostart on）".into()
                 }
             );
+            match heartbeat_fresh(&supervise_heartbeat_path(), SUPERVISE_FRESH) {
+                Some((pid, ts)) if pid_is_ours(pid) => println!(
+                    "看门狗：运行中（pid {pid}，心跳 {} 秒前）",
+                    now() - ts
+                ),
+                Some((_, ts)) => println!(
+                    "看门狗：已停止（最后心跳 {} 秒前）",
+                    now() - ts
+                ),
+                None => println!("看门狗：未运行"),
+            }
+            match heartbeat_fresh(&heartbeat_path(), HEARTBEAT_FRESH) {
+                Some((pid, ts)) if pid_is_ours(pid) => println!(
+                    "守护进程：运行中（pid {pid}，心跳 {} 秒前）",
+                    now() - ts
+                ),
+                Some((_, ts)) => println!(
+                    "守护进程：已停止（最后心跳 {} 秒前）",
+                    now() - ts
+                ),
+                None => println!("守护进程：未运行（没有心跳文件）"),
+            }
             println!(
                 "保存的目标：{}",
                 target.unwrap_or_else(|| "（自动发现）".into())
@@ -208,6 +467,54 @@ fn cmd_autostart(args: &Args) -> Result<()> {
     }
     Ok(())
 }
+
+/// 看门狗：常驻，每隔 10 秒确认守护还在，不在就补一份。
+/// 为什么需要它——启动文件夹只在登录那一刻执行一次，进程被结束、被更新覆盖、
+/// 或者自启装好之后根本没重新登录，都会出现「WorkBuddy 在跑、却没人推」。
+/// 它自己也是本程序，心跳写 `watchdog.hb`，`autostart status` 与 `off` 都看这个。
+async fn cmd_supervise(_args: &Args) -> Result<()> {
+    if supervise_alive() {
+        return Ok(());
+    }
+    println!(
+        "看门狗已启动（每 10 秒检查守护）：{}",
+        chrono::Local::now().format("%H:%M:%S")
+    );
+    let mut tick = tokio::time::interval(Duration::from_secs(10));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        write_supervise_heartbeat();
+        if guard_alive() {
+            continue;
+        }
+        match start_guard() {
+            Ok(()) => println!(
+                "[{}] 守护不在，已拉起",
+                chrono::Local::now().format("%H:%M:%S")
+            ),
+            Err(e) => eprintln!("拉起守护失败：{e}"),
+        }
+    }
+}
+
+/// 一次性检查：守护不在就拉起。给脚本/人工用，幂等，几十毫秒结束。
+fn cmd_ensure(args: &Args) -> Result<()> {
+    let verbose = args.get("verbose").is_some();
+    if guard_running() {
+        if verbose {
+            println!("守护在运行，无需拉起。");
+        }
+        return Ok(());
+    }
+    start_guard()?;
+    println!(
+        "[{}] 守护不在，已拉起",
+        chrono::Local::now().format("%H:%M:%S")
+    );
+    Ok(())
+}
+
 
 /// 本机持久化：只存状态缓存、设置与设备目标，不含任何会话正文。
 #[derive(Clone, Serialize, Deserialize)]
@@ -1258,6 +1565,24 @@ async fn wait_for_task(store: &mut Store, watcher: &mut Watcher) -> Result<bool>
 /// 连续失败 5 次才停（避免反复抢占设备）。ResultUnknown 不重发、不抢连接——
 /// 这条 SDK 约定只约束「同一次显示请求」，不影响断线后的重新建连。
 async fn cmd_watch(args: &Args) -> Result<()> {
+    // 单实例：watch.cmd 会在 exe 刚退出时立刻重启，若另一份守护已经在跑，
+    // 这里退出——不打印会让「为什么没动静」无从查起，所以留一行带 PID 的痕迹。
+    if !claim_instance() {
+        println!(
+            "[{}] 已有守护在跑，本进程（pid {}）退出",
+            chrono::Local::now().format("%H:%M:%S"),
+            std::process::id()
+        );
+        return Ok(());
+    }
+    println!(
+        "[{}] 守护进程启动（pid {}）",
+        chrono::Local::now().format("%H:%M:%S"),
+        std::process::id()
+    );
+    // 先落一次心跳，让看门狗/状态查询立刻看到「守护在跑」，不用等第一个 tick。
+    write_heartbeat();
+
     // 显式给了地址就记住：下次 `watch` / `run` / `push` 不带参数也能连上。
     let mut store = load_store();
     if let Some(t) = args.get("target").map(str::to_string) {
@@ -1282,6 +1607,17 @@ async fn cmd_watch(args: &Args) -> Result<()> {
         "守护模式已启动：目标 {}；有任务才占用设备，{grace} 秒无活跃任务即交还。",
         target.as_deref().unwrap_or("自动发现")
     );
+    // 心跳：看门狗、`ensure`、`autostart status` 靠它判断守护在不在。5 秒一次——
+    // 心跳过期即视为死亡，间隔越短，被结束后恢复得越快。写失败（磁盘满、权限）
+    // 只影响这几个判断，不影响推送。
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            write_heartbeat();
+        }
+    });
     let mut watcher = Watcher::new(workbuddy_root());
     loop {
         if !workbuddy_running() {
@@ -1395,7 +1731,10 @@ fn usage() {
                                                           常驻：跟随状态、按键翻页、提示音
   workbuddy-pet watch   [--target IP|ID] [--idle-grace 秒]         守护：WorkBuddy 一启动就待命，有任务才占用设备，
                                                           任务结束 5 分钟内没有新任务即交还并回到待命
-  workbuddy-pet autostart on|off|status [--target IP|ID]           开机自启（写启动文件夹，后台待命）
+  workbuddy-pet autostart on|off|status [--target IP|ID]           开机自启 + 看门狗；on 会装一份副本到数据目录、
+                                                          立刻启动守护，并注册 5 分钟一次的检查任务
+  workbuddy-pet ensure  [--verbose]                                看门狗入口：WorkBuddy 在跑、守护不在跑就拉起；
+                                                          幂等，可安全重复调用
   workbuddy-pet where                                              显示数据与配置路径
   workbuddy-pet forget                                             删除本机状态缓存
 
@@ -1437,6 +1776,8 @@ async fn main() {
         "run" | "start" => cmd_run(&args).await,
         "watch" | "daemon" => cmd_watch(&args).await,
         "autostart" | "startup" => cmd_autostart(&args),
+        "ensure" | "watchdog" => cmd_ensure(&args),
+        "supervise" | "supervisor" => cmd_supervise(&args).await,
         "balance" | "credit" => {
             println!("积分余额是云端数据、本地读不到，该显示项已下线；");
             println!("左下角现在显示当前会话的上下文占用（读 workbuddy.db 的 session_usage）。");
@@ -1574,5 +1915,14 @@ mod tests {
         // 设成和默认一样的 300 也要能分辨：Some(300) 不等于 None。
         store.idle_grace = Some(300);
         assert!(store.idle_grace.is_some());
+    }
+
+    #[test]
+    fn heartbeat_parses_pid_and_time() {
+        assert_eq!(parse_heartbeat("4242\n1700000000\n"), Some((4242, 1_700_000_000)));
+        // 只有一行、或不是数字，都算无效——宁可当成「没有守护」，也不能误判成活着。
+        assert_eq!(parse_heartbeat("4242\n"), None);
+        assert_eq!(parse_heartbeat(""), None);
+        assert_eq!(parse_heartbeat("abc\ndef\n"), None);
     }
 }
