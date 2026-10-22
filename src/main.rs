@@ -222,17 +222,17 @@ struct Store {
     /// 在设备超时重连、守护重启后依然不重复响——同一次等待只吵人一次。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     announced: Option<String>,
-    /// 守护模式下，最后一个任务结束到交还设备之间保留多久（秒）。
-    /// 留一段时间是为了让「任务完成」画面停在屏上，也给连续追问留出无缝衔接；
-    /// 这段时间内又有新任务就不用断开重连。
-    #[serde(default = "default_idle_grace")]
-    idle_grace: u32,
+    /// 守护模式下，最后一个任务结束到交还设备之间保留多久（秒）。规则是
+    /// 「任务完成后 5 分钟内没有新任务就解除占用」。`None` = 还没人设过，
+    /// 跟随 `default_idle_grace()`——这样「显式设成 300」和「默认 300」能区分开，
+    /// 否则写入合并时会把它当成默认值又让磁盘旧值盖回去。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    idle_grace: Option<u32>,
 }
 
-/// 任务结束后再占着设备的宽限。墨水屏断电后画面不会消失（完成页留在屏上不需要
-/// 靠连接维持），所以这里只需够「连续追问」衔接用，不必长占设备。
+/// 任务完成后多久没有新任务就交还设备：5 分钟。
 fn default_idle_grace() -> u32 {
-    30
+    300
 }
 
 fn default_format() -> String {
@@ -246,8 +246,15 @@ impl Default for Store {
             target: None,
             format: default_format(),
             announced: None,
-            idle_grace: default_idle_grace(),
+            idle_grace: None,
         }
+    }
+}
+
+impl Store {
+    /// 实际生效的宽限秒数：没设过就用默认 5 分钟。
+    fn idle_grace(&self) -> i64 {
+        self.idle_grace.unwrap_or_else(default_idle_grace) as i64
     }
 }
 
@@ -292,7 +299,7 @@ fn save_store(store: &Store) -> Result<()> {
         if out.announced.is_none() {
             out.announced = disk.announced;
         }
-        if out.idle_grace == default_idle_grace() && disk.idle_grace != default_idle_grace() {
+        if out.idle_grace.is_none() {
             out.idle_grace = disk.idle_grace;
         }
     }
@@ -1077,7 +1084,8 @@ async fn cmd_run(args: &Args) -> Result<()> {
     let grace = args
         .get("idle-grace")
         .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(store.idle_grace) as i64;
+        .map(|v| v as i64)
+        .unwrap_or_else(|| store.idle_grace());
     let mut frame = 0usize;
     let mut last_sig: Option<String> = None;
     let mut scan_tick = tokio::time::interval(Duration::from_secs(2));
@@ -1225,9 +1233,10 @@ async fn cmd_watch(args: &Args) -> Result<()> {
             save_store(&store)?;
         }
     }
+    // 显式给的宽限要记下来（`Some` 才代表用户设过），下次不带参数也照旧。
     if let Some(g) = args.get("idle-grace").and_then(|v| v.parse::<u32>().ok()) {
-        if store.idle_grace != g {
-            store.idle_grace = g;
+        if store.idle_grace != Some(g) {
+            store.idle_grace = Some(g);
             save_store(&store)?;
         }
     }
@@ -1235,7 +1244,7 @@ async fn cmd_watch(args: &Args) -> Result<()> {
         .get("target")
         .map(str::to_string)
         .or_else(|| store.target.clone());
-    let grace = store.idle_grace;
+    let grace = store.idle_grace();
     println!(
         "守护模式已启动：目标 {}；有任务才占用设备，{grace} 秒无活跃任务即交还。",
         target.as_deref().unwrap_or("自动发现")
@@ -1497,5 +1506,28 @@ mod tests {
         // 一个任务都没有（手动 run --standby）：直接交还。
         let m = Model::default();
         assert!(may_release(&m, 100, 60));
+    }
+
+    #[test]
+    fn default_grace_is_five_minutes_after_the_last_task() {
+        // 规则：任务完成后 5 分钟内没有新任务下达就解除占用。
+        let store = Store::default();
+        assert_eq!(store.idle_grace(), 300);
+        let m = model_with(1, Status::Done, 1_000);
+        assert!(!may_release(&m, 1_000, store.idle_grace()));
+        assert!(!may_release(&m, 1_299, store.idle_grace()));
+        assert!(may_release(&m, 1_300, store.idle_grace()));
+    }
+
+    #[test]
+    fn an_explicit_grace_is_not_mistaken_for_the_default() {
+        // 显式设过（Some）就必须以它为准，不能被「等于默认值」误判成没设过，
+        // 否则写回 state.json 时会被磁盘旧值盖回去。
+        let mut store = Store::default();
+        store.idle_grace = Some(90);
+        assert_eq!(store.idle_grace(), 90);
+        // 设成和默认一样的 300 也要能分辨：Some(300) 不等于 None。
+        store.idle_grace = Some(300);
+        assert!(store.idle_grace.is_some());
     }
 }
