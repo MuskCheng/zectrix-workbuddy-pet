@@ -38,20 +38,20 @@
 ### 下载即用（最快，无需编译）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.1.1-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
+`workbuddy-pet-0.1.2-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
 （约 5.4 MB），不依赖 .NET、不依赖 VC++ 运行库、不需要 Rust 工具链，也不用管 SDK 目录：
 
 ```powershell
-.\workbuddy-pet-0.1.1-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
+.\workbuddy-pet-0.1.2-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
 Start-Sleep 9                                                # 固件释放单连接约需 8 秒
-.\workbuddy-pet-0.1.1-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
-.\workbuddy-pet-0.1.1-windows-x64.exe autostart on --target <IP>
+.\workbuddy-pet-0.1.2-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
+.\workbuddy-pet-0.1.2-windows-x64.exe autostart on --target <IP>
 ```
 
 下载页同时给出 `SHA256SUMS.txt`，可核对文件完整性：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.1.1-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.1.2-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 二进制仍然**只是宠物程序**：它读本机 WorkBuddy 的会话数据，并直接连局域网里的 Note 4；

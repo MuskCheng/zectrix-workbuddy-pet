@@ -1,6 +1,6 @@
 [package]
 name = "workbuddy-pet"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 description = "ZECTRIX Note 4 像素宠物：跟随本机 WorkBuddy 会话状态，经 zectrix-sdk 局域网直连推送"

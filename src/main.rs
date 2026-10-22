@@ -1732,7 +1732,7 @@ fn usage() {
   workbuddy-pet watch   [--target IP|ID] [--idle-grace 秒]         守护：WorkBuddy 一启动就待命，有任务才占用设备，
                                                           任务结束 5 分钟内没有新任务即交还并回到待命
   workbuddy-pet autostart on|off|status [--target IP|ID]           开机自启 + 看门狗；on 会装一份副本到数据目录、
-                                                          立刻启动守护，并注册 5 分钟一次的检查任务
+                                                          立刻启动看门狗（不依赖下次登录），并写自启项
   workbuddy-pet ensure  [--verbose]                                看门狗入口：WorkBuddy 在跑、守护不在跑就拉起；
                                                           幂等，可安全重复调用
   workbuddy-pet where                                              显示数据与配置路径
