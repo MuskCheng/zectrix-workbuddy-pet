@@ -132,8 +132,8 @@ struct Cursor {
     carry: Vec<u8>,
     task: Option<String>,
     turn: u32,
-    /// 会话级标题（WorkBuddy 写的 `ai-title`）。与侧边栏显示的是同一个名字，
-    /// 上屏优先用它，保持两边一致；改名/重新生成都能通过增量读取跟上。
+    /// 会话级标题（WorkBuddy 写进 JSONL 的 `ai-title`）。注意侧边栏改名**不写这里**，
+    /// 只写 workbuddy.db 的 sessions 表——所以它只是库里读不到时的兜底。
     title: String,
     /// 本轮用户真正问了什么，逐轮更新。仅在会话没有标题时作兜底。
     turn_title: Option<String>,
@@ -228,6 +228,64 @@ fn user_title(v: &Value) -> Option<String> {
     } else {
         Some(t)
     }
+}
+
+/// 读各会话在侧边栏显示的名字。来源：`~/.workbuddy/workbuddy.db` 的 `sessions` 表，
+/// `custom_title`（用户手动改名）优先，其次 `title`（WorkBuddy 生成的会话名）。
+/// **侧边栏改名只写这个库，不写会话 JSONL**——盯着 JSONL 的 ai-title 永远看不到改名。
+///
+/// 与上下文占用同样的读法：WAL 模式下只读打开会尝试写 shm/wal，先复制 db+wal
+/// 到临时目录再读副本；结果缓存 15 秒，改名不是高频操作，够跟了。
+fn db_titles() -> std::collections::HashMap<String, String> {
+    use std::time::{Duration, Instant};
+    type Map = std::collections::HashMap<String, String>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<(Instant, Map)>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        std::sync::Mutex::new((Instant::now() - Duration::from_secs(3600), Map::new()))
+    });
+    let Ok(mut guard) = cache.lock() else {
+        return Map::new();
+    };
+    if guard.0.elapsed() < Duration::from_secs(15) {
+        return guard.1.clone();
+    }
+    let mut map = Map::new();
+    if let Some(home) = std::env::var("USERPROFILE").ok() {
+        let src = std::path::PathBuf::from(home)
+            .join(".workbuddy")
+            .join("workbuddy.db");
+        if src.is_file() {
+            let tmp = std::env::temp_dir().join("workbuddy-pet-titles.db");
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(tmp.with_extension("db-wal"));
+            if std::fs::copy(&src, &tmp).is_ok() {
+                let _ = std::fs::copy(src.with_extension("db-wal"), tmp.with_extension("db-wal"));
+                if let Ok(conn) = rusqlite::Connection::open(&tmp) {
+                    let _ = conn.busy_timeout(Duration::from_millis(300));
+                    if let Ok(mut stmt) = conn.prepare(
+                        "select id, coalesce(nullif(custom_title, ''), title, '') \
+                         from sessions where deleted_at is null",
+                    ) {
+                        if let Ok(rows) = stmt
+                            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                        {
+                            for (id, title) in rows.flatten() {
+                                let t = clean(title.trim(), 60);
+                                if !t.is_empty() {
+                                    map.insert(id, t);
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = std::fs::remove_file(&tmp);
+                let _ = std::fs::remove_file(tmp.with_extension("db-wal"));
+            }
+        }
+    }
+    *guard = (Instant::now(), map.clone());
+    map
 }
 
 fn now_secs() -> i64 {
@@ -457,16 +515,16 @@ impl Cursor {
         let now = now_secs();
         let status = self.status(now)?;
         let task = self.task.clone()?;
-        let title = if !self.title.is_empty() {
-            // 会话标题优先：与 WorkBuddy 侧边栏显示的同一个名字，两边保持一致。
-            // 增量读取会跟踪 mid-file 的 ai-title 记录，改名/重新生成都会跟上。
-            self.title.clone()
-        } else {
-            match self.turn_title.as_deref() {
-                // 没有会话标题时退到本轮提问，再退到项目名。
+        // 上屏名字与侧边栏保持一致。侧边栏显示的是 workbuddy.db sessions 表里的
+        // custom_title/title（改名只写库、不写 JSONL），所以库里的名字最优先；
+        // 库读不到（路径不同、库被锁）才退到 JSONL 的 ai-title，再退到本轮提问/项目名。
+        let title = match db_titles().get(stem) {
+            Some(t) if !t.trim().is_empty() => t.clone(),
+            _ if !self.title.is_empty() => self.title.clone(),
+            _ => match self.turn_title.as_deref() {
                 Some(t) if !t.trim().is_empty() => t.to_string(),
                 _ => fallback.to_string(),
-            }
+            },
         };
         let progress = self.progress();
         // 没有清单百分比时，进度条区域改上最近工具活动的文字描述，
