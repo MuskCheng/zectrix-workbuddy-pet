@@ -30,8 +30,12 @@
 前置：Rust（MSVC 工具链）、CMake、Visual Studio C++ Build Tools（SDK 的原生 Opus 需要）。
 系统字体 `C:\Windows\Fonts\msyh.ttc` 与 `msyhbd.ttc` 用于渲染中文。
 
+推送用的是官方 SDK，本项目**不复制也不修改**它，而是以路径依赖引用同一层目录里的克隆：
+
 ```bat
-cd D:\repositories\workbuddy-pet
+cd D:\repositories
+git clone https://github.com/itopinion/zectrix-local-push-sdk.git
+cd workbuddy-pet
 set CMAKE_POLICY_VERSION_MINIMUM=3.5
 cargo test --release
 cargo build --release

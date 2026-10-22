@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "ZECTRIX Note 4 像素宠物：跟随本机 WorkBuddy 会话状态，经 zectrix-sdk 局域网直连推送"
+repository = "https://github.com/MuskCheng/zectrix-workbuddy-pet"
+readme = "README.md"
+keywords = ["zectrix", "eink", "workbuddy", "pet"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 zectrix-sdk = { path = "../zectrix-local-push-sdk" }
@@ -14,5 +18,5 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["png"] }
-# 只读 WorkBuddy 的 ~/.workbuddy/workbuddy.db（session_usage.credit_json）取积分消耗
+# 只读 WorkBuddy 的 ~/.workbuddy/workbuddy.db（session_usage.used/size）取上下文占用
 rusqlite = { version = "0.32", features = ["bundled"] }
