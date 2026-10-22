@@ -397,7 +397,7 @@ fn read_contexts() -> std::collections::HashMap<String, (u32, u32)> {
         return guard.1.clone();
     }
     let mut map = Map::new();
-    if let Some(home) = std::env::var("USERPROFILE").ok() {
+    if let Ok(home) = std::env::var("USERPROFILE") {
         let src = std::path::PathBuf::from(home)
             .join(".workbuddy")
             .join("workbuddy.db");
@@ -1524,8 +1524,10 @@ mod tests {
     fn an_explicit_grace_is_not_mistaken_for_the_default() {
         // 显式设过（Some）就必须以它为准，不能被「等于默认值」误判成没设过，
         // 否则写回 state.json 时会被磁盘旧值盖回去。
-        let mut store = Store::default();
-        store.idle_grace = Some(90);
+        let mut store = Store {
+            idle_grace: Some(90),
+            ..Store::default()
+        };
         assert_eq!(store.idle_grace(), 90);
         // 设成和默认一样的 300 也要能分辨：Some(300) 不等于 None。
         store.idle_grace = Some(300);

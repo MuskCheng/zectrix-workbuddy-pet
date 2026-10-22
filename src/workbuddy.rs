@@ -251,7 +251,7 @@ fn db_titles() -> std::collections::HashMap<String, String> {
         return guard.1.clone();
     }
     let mut map = Map::new();
-    if let Some(home) = std::env::var("USERPROFILE").ok() {
+    if let Ok(home) = std::env::var("USERPROFILE") {
         let src = std::path::PathBuf::from(home)
             .join(".workbuddy")
             .join("workbuddy.db");
@@ -573,6 +573,7 @@ impl Cursor {
 /// 「任务等待确认」有权威事件——侧边栏的「待确认」徽章就是它驱动的：
 /// - `[TaskNotify] pending: session=<uuid> kind=question|permission sent=…`
 /// - `[TaskNotify] completed: session=<uuid> …`
+///
 /// 权限确认卡完全不写会话 JSONL，这是唯一能覆盖所有确认形态的信号源。
 #[derive(Default)]
 struct TaskNotify {
@@ -723,7 +724,7 @@ impl Watcher {
                 }
             }
         }
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by_key(|a| std::cmp::Reverse(a.1));
         out.truncate(MAX_FILES);
         Ok(out)
     }
@@ -1062,9 +1063,11 @@ mod tests {
     #[test]
     fn completion_is_held_until_quiet() {
         let now = now_secs();
-        let mut c = Cursor::default();
-        c.task = Some("t-demo".into());
-        c.last = Last::AssistantComplete;
+        let mut c = Cursor {
+            task: Some("t-demo".into()),
+            last: Last::AssistantComplete,
+            ..Cursor::default()
+        };
         // 记录刚写入：完成后面可能还有工具调用，先压住。
         c.seen_at = now;
         assert!(!c.settled(false), "刚落盘的完成不能立刻上报");
@@ -1388,7 +1391,7 @@ mod tests {
 
         // 卡住超过窗口（无 function_call_result）：判定为权限确认在等。
         // 先追加一条足够新的活动记录，让卡住窗口覆盖真实时间。
-        let mut stale = json!({"type":"function_call","name":"Write","callId":"w-2",
+        let stale = json!({"type":"function_call","name":"Write","callId":"w-2",
                "timestamp":(now - PERM_CONFIRM_SECS - 2) * 1000,"arguments":"{}","cwd":"C:/work/demo"});
         append(&root, &[stale]);
         let evs = w.scan().unwrap();

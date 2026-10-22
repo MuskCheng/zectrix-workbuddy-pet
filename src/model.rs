@@ -237,12 +237,12 @@ impl Model {
                 // 同一条记录被重新推导（守护重启后的全新扫描）：记录本身没变，
                 // 但派生字段可能变了——最典型的是会话标题在会话中途被重新生成，
                 // 重新扫描才第一次读到。内容有变就更新文案，完全一致才去重。
-                if event.status == t.event.status {
-                    if event.title != t.event.title || event.detail != t.event.detail {
-                        t.event.title = event.title;
-                        t.event.detail = event.detail;
-                        return Ok(true);
-                    }
+                if event.status == t.event.status
+                    && (event.title != t.event.title || event.detail != t.event.detail)
+                {
+                    t.event.title = event.title;
+                    t.event.detail = event.detail;
+                    return Ok(true);
                 }
                 return Ok(false);
             }

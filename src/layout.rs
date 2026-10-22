@@ -641,9 +641,11 @@ mod tests {
 
     #[test]
     fn ctx_label_shows_percent_and_headroom() {
-        let mut m = Model::default();
-        m.ctx_used = Some(119222);
-        m.ctx_size = Some(300000);
+        let mut m = Model {
+            ctx_used: Some(119222),
+            ctx_size: Some(300000),
+            ..Model::default()
+        };
         assert_eq!(ctx_label(&m).as_deref(), Some("上下文 40% · 剩 181K"));
         m.ctx_used = Some(299600);
         assert_eq!(ctx_label(&m).as_deref(), Some("上下文 100% · 剩 <1K"));

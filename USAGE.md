@@ -1,74 +1,104 @@
-# workbuddy-pet — ZECTRIX Note 4 像素宠物（WorkBuddy 版）
+# workbuddy-pet — 使用说明
+
+[ZECTRIX Note 4](https://wiki.zectrix.com/) 400×300 墨水屏像素宠物，跟随本机 WorkBuddy。
+首页与安装见 [README.md](README.md)，这里是完整命令与行为细节。
+
+## 与上游的差异
 
 复用 [zectrix-agent-pet](https://github.com/itopinion/zectrix-agent-pet) 0.3.4（MIT）的
-状态模型、400×300 布局与提示音逻辑，做了两处本机化替换：
+状态模型、400×300 布局与提示音逻辑，做了几处本机化替换：
 
 | 上游（Hub 版） | 本机版（workbuddy-pet） |
 |---|---|
-| ZECTRIX Hub 负责渲染/连接/音频 | 直接用 [zectrix-local-push-sdk](../zectrix-local-push-sdk) 局域网直连 |
-| 读取 `~/.codex/sessions` 跟随 Codex | 读取 `~/.workbuddy/projects` 跟随 **WorkBuddy** |
+| ZECTRIX Hub 负责渲染/连接/音频 | 直接用 [zectrix-local-push-sdk](https://github.com/itopinion/zectrix-local-push-sdk) 局域网直连 |
+| 读取 `~/.codex/sessions` 跟随 Codex | 读取 `~/.workbuddy` 跟随 **WorkBuddy** |
 | macOS aarch64 | Windows x64（本机验证） |
 
-状态来源：只读 `%USERPROFILE%\.workbuddy\projects\<项目>\<会话>.jsonl` 的生命周期元数据
-（轮次开始、`AskUserQuestion`/`ExitPlanMode` 结构化提问、助手消息状态、ai-title，
-以及 `todo_write` 任务清单的条目数与状态）。
-**不读取、不保存、不上传对话正文、推理、工具参数或代码。**
+## 状态来源
+
+只读三处本机数据，全部只取元数据，**不读取、不保存、不上传对话正文、推理、工具参数或代码**：
+
+| 来源 | 取什么 |
+|---|---|
+| `%USERPROFILE%\.workbuddy\projects\<项目>\<会话>.jsonl` | 轮次开始、`AskUserQuestion`/`ExitPlanMode`、助手消息状态、`todo_write` 清单条目 |
+| `%USERPROFILE%\.workbuddy\logs\main.log` | `[TaskNotify] pending/completed`：提问与**权限确认卡**的权威信号 |
+| `%USERPROFILE%\.workbuddy\workbuddy.db` | `sessions`（侧边栏会话名）、`session_usage`（上下文占用） |
 
 状态映射（只认明确记录，不做推测）：
 
-- 用户新轮次 → `工作`；普通文本提问、失败的工具调用都不会被猜成等待或失败
+- 用户新轮次 → `正在工作`；普通文本提问、失败的工具调用都不会被猜成等待或失败
 - 有未答复的 `AskUserQuestion` / `ExitPlanMode` → `等你处理`
-- 文件尾部是已完成（completed）的助手消息 → `完成`
+- 主进程登记 pending（question / permission）→ `等你处理`，与侧边栏「待确认」徽章同源
+- 会话尾部是已完成（completed）的助手消息、且静默 8 秒 → `任务完成`
 - 助手消息被中断 → `已停止`
 - 超过 15 分钟无更新 → `状态待确认`（绝不自动判成功）
 
-进度百分比（两个来源，界面措辞严格区分）：
+进度百分比有两个来源，界面措辞严格区分：
 
-- `任务清单 3/7 · 43%` —— 从本轮 `todo_write` 清单推算的完成项占比
-  （已完成 ÷ 总数，取消项不占分母）；Agent 没写过清单就没有这个数字
-- `Agent 上报进度 60%` —— Agent 通过事件接口主动上报的进度（演示画面即此来源）
-- 进度变化本身就是一次画面变化，会触发刷新；清单按轮次计，新轮次从零开始
+- `任务清单 3/7 · 43%`——从本轮 `todo_write` 清单推算（已完成 ÷ 总数，取消项不占分母）；
+  Agent 没写过清单就没有这个数字
+- `上报 65%`——Agent 通过事件接口主动上报；未知进度不生成百分比
+- 清单按轮次计，新轮次从零开始；进度变化本身就是一次画面变化
 
 ## 构建
 
 ```bat
 cd workbuddy-pet
 set CMAKE_POLICY_VERSION_MINIMUM=3.5
-cargo test --locked        & rem 19 项单元测试
+cargo test --locked --release      & rem 46 项测试
 cargo build --locked --release
 ```
 
-依赖：Rust (msvc)、CMake、VS 生成工具（SDK 的原生 Opus 需要）；系统字体
-`C:\Windows\Fonts\msyh.ttc` / `msyhbd.ttc`（渲染中文）。
+依赖：Rust（MSVC）、CMake、VS C++ Build Tools（SDK 的原生 Opus 需要）；系统字体
+`C:\Windows\Fonts\msyh.ttc` / `msyhbd.ttc`（渲染中文）。SDK 以路径依赖引用同级的
+官方克隆，本项目不复制、不修改它。
 
 ## 常用命令
 
 ```bat
-workbuddy-pet init                       首次引导：检查配置 → 连设备 → 预览 → 确认推送 → 自启
-workbuddy-pet sessions                        列出本机会话及推导状态与清单进度（诊断）
-workbuddy-pet preview [--demo waiting] [--session <会话ID>]
-                                     渲染 400×300 预览 PNG，不连设备；
-                                     --session 只看指定会话（不落盘）
-workbuddy-pet check  --target 192.168.1.100  核对设备（型号/电量/色板），不推画面
-workbuddy-pet sound  --status done --target … 只播一次提示音
-workbuddy-pet push   [--demo 状态] [--target …] [--format gray16|gray4|mono]
-                                     单次推送后立即断开
-workbuddy-pet run    [--target …] [--volume 0-100] [--no-sound] [--no-animation]
-                                     常驻：跟随状态、按键翻页、提示音
-workbuddy-pet watch  [--target …]             守护：WorkBuddy 启动即连、退出即断（推荐日常用）
-workbuddy-pet autostart on|off|status [--target …]
-                                     开机自启：写启动文件夹，后台静默等待 WorkBuddy
-workbuddy-pet where                           配置与输出路径
-workbuddy-pet forget                          删除本机状态缓存
+workbuddy-pet init                               首次引导：检查配置 → 连设备 → 预览 → 确认推送 → 自启
+workbuddy-pet sessions                           列出本机会话及推导状态与清单进度（诊断）
+workbuddy-pet preview [--demo waiting] [--session <会话ID>] [--out 路径]
+                                                 渲染 400×300 预览 PNG，不连设备；
+                                                 --session 只看指定会话（不落盘）
+workbuddy-pet scene [--demo 状态]                打印布局 JSON（调试版式）
+workbuddy-pet check  --target 192.168.1.100      核对设备（型号/电量/信号），不推画面
+workbuddy-pet sound  --status waiting|done       只播一次提示音（--volume 0-100）
+workbuddy-pet push   [--demo 状态] [--format gray16|gray4|mono]
+                                                 单次推送后立即断开
+workbuddy-pet run    [--standby] [--volume 0-100] [--no-sound] [--no-animation]
+                                                 常驻：跟随状态、按键翻页、提示音
+workbuddy-pet watch  [--idle-grace 300]          守护：待命不占设备，有任务才占用（推荐日常）
+workbuddy-pet autostart on|off|status            开机自启：写启动文件夹，后台待命
+workbuddy-pet where                              配置与输出路径
+workbuddy-pet forget                             删除本机状态缓存
 ```
 
 - 设备与电脑需同一局域网，设备上开启「设置 → 网络同步 → **待机保持 Wi-Fi**」。
-- `--demo` 的演示画面右上角标注「演示」、底栏显示「演示数据」，不写入任务历史。
-- 交互应用需要电脑程序持续运行；网页/终端关掉不影响 `run`。
+- `--demo` 的演示画面右上角标注「演示」、底栏显示「演示数据」，不写入任务历史，
+  也不代表真实任务进度。
+- `--format` 默认 `gray16`（16 级灰阶）；`gray4`、`mono` 刷新更快但细节更少。
 
-## 自动跟随（WorkBuddy 一启动就推送）
+## 设备占用策略
 
-一次设置，之后开机就有：
+一台设备同一时刻只允许一个连接，所以守护按任务开关设备：
+
+| 阶段 | 守护在做什么 | 设备 |
+|---|---|---|
+| WorkBuddy 未启动 | 每 5 秒看一眼进程，不碰设备 | 完全空闲 |
+| 待命（已启动、无任务） | 只读会话文件推断状态，**不连接** | 完全空闲 |
+| 有任务（工作 / 等你处理） | 连接、推送、翻页、响铃 | 被占用 |
+| 任务结束 | 再守 `idle_grace` 秒（默认 300） | 期内没新任务就 `close()` 交还 |
+
+- 任务完成后 5 分钟内没有新任务才交还，给连续追问留无缝衔接；墨水屏断电后保留最后一帧，
+  所以交还设备不会让完成画面消失。
+- `--idle-grace 120` 改宽限；`0` 表示任务一结束就交还。值存进 `state.json`。
+- 「等你处理」也算活跃任务；但超过 15 分钟没有新动静会判为「状态待确认」并交还设备。
+- 设备休眠导致的 `Timeout` 断开，只在任务仍活跃时按 15 秒步长退避重连，连续失败 5 次停下，
+  等下一个任务再试，不与别的程序抢设备。
+- 手动 `run` 默认一直占着（便于调试），加 `--standby` 才有交还行为。
+
+## 自动跟随
 
 ```bat
 workbuddy-pet autostart on --target 192.168.1.100
@@ -76,119 +106,103 @@ workbuddy-pet autostart on --target 192.168.1.100
 
 它做三件事：
 
-1. 在 `%APPDATA%\...\Startup\zectrix-workbuddy-pet.vbs` 放一个自启项（隐藏窗口，不弹黑框）
-2. 生成 `%LOCALAPPDATA%\zectrix-workbuddy-pet\watch.cmd`，内容带设备 IP，日志写到同目录 `watch.log`
+1. 在 `%APPDATA%\...\Startup\zectrix-workbuddy-pet.vbs` 放自启项（隐藏窗口，不弹黑框）
+2. 生成 `%LOCALAPPDATA%\zectrix-workbuddy-pet\watch.cmd`（含设备 IP，日志写同目录 `watch.log`）
 3. 把目标 IP 存进 `state.json`
 
-启动逻辑（`workbuddy-pet watch`）：每 5 秒检查一次 `WorkBuddy.exe` 是否存在
+之后登录 Windows 就在后台待命。想立刻生效不必重启：`workbuddy-pet watch`
+（或双击 `watch.cmd`）。
 
-- **WorkBuddy 出现** → 连接设备、推当前状态、开始跟随；每 2 秒扫一次会话，
-  **只有状态、标题、进度或选中项真的变了才刷屏**——没有变化就一帧都不发
-  （2026-10-21 改：不再有周期性重刷，也没有动画轮播；`animation` 设置仅让
-  每次实际刷新的姿态略有不同）
-- **WorkBuddy 退出** → 正常 `close()` 断开，回到待命，不再占用设备
-- **会话异常结束而 WorkBuddy 还在**（例如设备被别的程序占用）→ 只记日志，等 WorkBuddy
-  退出后才重试；不在同一会话里自动重连、不强抢设备
-
-现在想立刻生效，不必重启系统：`workbuddy-pet watch`（或双击 `watch.cmd`）。
+推送节流：每 2 秒扫一次会话，只有状态、标题、进度或选中项真的变了才刷屏；
+没有变化一帧都不发。`animation` 关闭时画面完全静止，仅状态变化或手动翻页才更新。
 
 ## 按键
 
 - `上/下`：多任务时翻页（每页 4 个，末页循环回首页）；≤4 个时选择任务
 - `确认`：恢复首页与自动跟随（**不会**批准 Agent 的任何操作）
 
+列表顺序按会话标识固定，心跳和状态更新不会换位；同一会话只显示最新一轮。
+
 ## 等待处理时的画面
 
-Agent 提问（AskUserQuestion 等）时，设备只显示**题干 + 一条框起来的指引**
-「需要你处理 · 请回到电脑上确认」，底部提示变为「请回电脑处理 · 设备仅提示」，
-并播放提示音。**不显示选项列表、也没有上下键选择**——设备无法替你点击
-电脑上的选项（实测模拟键盘与 UI Automation 都不可行，详见下节），
-列出选项只会让人误以为能在设备上选。
+Agent 提问或权限确认卡在等时，设备显示**题干 + 一条框起来的指引**
+「请回到电脑确认」，底部提示变为「设备仅作提示」，并播放提示音。
+**不显示选项列表、也没有上下键选择**——设备无法替你点击电脑上的选项
+（实测模拟键盘与 UI Automation 都不可行），列出选项只会让人误以为能在设备上选。
 
-### 为什么设备不能替你"点"电脑上的选项
+### 信号源
 
-- 选项卡片只接受鼠标点击。模拟键盘（`keybd_event` 发 Down/Enter）能送达
-  WorkBuddy 窗口，但卡片毫无反应（2026-10-22 实测定案）；
-- 用 UI Automation 直接点按控件也不可行：本机执行策略禁止 `Add-Type` /
-  反射加载 UIAutomation 程序集；
-- 写会话文件"替用户回答"是伪造输入、会污染记录，不做。
+- **权威**：`main.log` 的 `[TaskNotify] pending: session=<uuid> kind=question|permission`。
+  权限确认卡完全不写会话 JSONL，Bash 等命令的确认卡也只有这里有信号；跨会话同样有效。
+- **兜底启发式**：`Write`/`Edit`/`MultiEdit`/`NotebookEdit` 或 `mcp__*` 调用发起后
+  超过 10 秒没有结果，判定为权限卡在等。`main.log` 被清理或轮转到 512 KiB 之外时才会用到，
+  写入大文件可能误报一次，点完允许或执行完成即恢复。
+- 提示音与「等你处理」一致；确认完成后立即恢复。
 
-## 启动 / 停止 / 卸载 / 更新
+### 为什么设备不能替你「点」电脑上的选项
 
-- **启动**：`workbuddy-pet watch --target 192.168.1.100`（后台跟随 WorkBuddy，可配合
-  `autostart on` 开机自动跑）；临时用一次就 `workbuddy-pet run --target …`
-- **停止**：Ctrl+C——程序会向设备发送 close、保存状态后退出；不自动重连，再次运行即可。
-  后台守护模式用任务管理器结束 `workbuddy-pet.exe`（强杀后设备约 15 秒才释放租约，属固件行为）
-- **卸载**：`workbuddy-pet autostart off`（删自启项与守护脚本）→ `workbuddy-pet forget` →
-  删除 `workbuddy-pet` 目录与 `%LOCALAPPDATA%\zectrix-workbuddy-pet`；不触碰 WorkBuddy 与设备上的任何数据
-- **更新**：进入 `zectrix-local-push-sdk` / `zectrix-agent-pet` 目录 `git pull`，
-  本仓库 `cargo build --locked --release`；状态缓存保留。
-  注意本机 `zectrix-local-push-sdk` 有 3 处本地改动（见下），`git pull` 冲突时可丢弃
-- **数据**：`%LOCALAPPDATA%\zectrix-workbuddy-pet\state.json` 只存任务标题、状态与设置；
-  录音存 `%LOCALAPPDATA%\zectrix-workbuddy-pet\out\recordings\*.wav`。请勿在 WorkBuddy
-  会话标题里放敏感信息（标题会显示在设备上）
+- 选项卡片只接受鼠标点击。模拟键盘（`keybd_event` 发 Down/Enter）能送达 WorkBuddy 窗口，
+  卡片毫无反应（2026-10-22 实测）；
+- UI Automation 直接点按控件不可行：本机执行策略禁止 `Add-Type` / 反射加载 UIAutomation；
+- 写会话文件「替用户回答」是伪造输入、会污染记录，不做。
 
-## 已知边界
+## 提示音
 
-- WorkBuddy 会话文件格式是逆向适配，不是官方稳定 API；格式变化会失效（表现为
-  「状态待确认」，不会显示错误状态）
-- 墨水屏只在真实变化时刷新；连续变化会在 2 秒的扫描间隔内合并成一次刷新
-- SDK 不含语音识别/TTS；录音由设备长按确认键触发，`run` 会把录音存成 WAV
-- **提示音上限 300 ms（已定位根因并修复）**：本台 NOTE4（固件 3.7.2）的单条播放流
-  只能收 6 帧（360 ms），实测**超过 5 帧就回 RESULT 结束原因 7「处理失败」**——
-  与音量（0/50/100 都一样）、连接后延时、发送节奏都无关。SDK 官方 `examples/play.rs`
-  那段 1 秒正弦同样失败，所以不是 workbuddy-pet 的 bug。修法是把提示音压到 200 ms 左右：
-  「等你处理」= 双短音 200 ms，「任务完成」= 上行三连音 220 ms，`sound` 现在稳定返回
-  `Completed`。想更长只能拆成多条流，但流与流之间设备要 2～6 秒才能接受下一条
-  （AUDIO_BEGIN 会重传），所以不做拼接
-- 本机 `zectrix-local-push-sdk` 的 3 处本地改动（均为诊断/兼容，已 `cargo test` 通过）：
-  1. `tests/lan.rs`：Windows 上 UDP `WSAECONNRESET` 导致的假失败
-  2. `src/device.rs`：`ZECTRIX_DEBUG=1` 打印收发帧（定位“设备处理失败”靠它）
-  3. `src/device.rs`：`ZECTRIX_PACE_MS` 可调音频发送间隔（默认仍是 60 ms）
-- `ResultUnknown` 视为“可能已刷新”，不重发同一帧
-- 清单进度依赖会话文件能读到 `todo_write`：Agent 用任务清单跟进度时自动出现；
-  超过 2 MB 的大会话首次导入只读尾部（清单记录在中部的历史轮次不算），运行中的
-  任务清单持续追加在尾部，不受影响
+- 「等你处理」= 双短音 200 ms，「任务完成」= 上行三连音 220 ms，默认音量 90%。
+- **单条流上限约 360 ms（固件行为）**：本机 NOTE4（固件 3.7.2）单条播放流只能收 6 帧，
+  实测超过 5 帧就返回「处理失败」，与音量、连接延时、发送节奏都无关；SDK 官方
+  `examples/play.rs` 的 1 秒正弦同样失败。所以提示音压到 200 ms 左右。想更长只能拆流，
+  但流之间设备要 2～6 秒才接受下一条，不划算。
+- 只在状态真的变化时响；启动/重连的首扫静默，但若此刻正停在「等你处理」会补响一次。
+- 同一条提醒只响一次（指纹存 `state.json` 的 `announced`），设备反复重连不重复吵人。
 
 ## 底部状态栏
 
-- **左下角**：优先显示「积分余额 ◇x,xxx.xx」——基准来自 `workbuddy-pet balance 2023.15`
-  （设置页的积分余额是云端数据，本地磁盘/数据库/日志均无缓存，守护读不到，
-  只能手动登记，变动后重跑一次 `workbuddy-pet balance <新值>`；`workbuddy-pet balance` 不带参数清除）。
-  没有基准时显示「积分已消耗 ◇x.xx」——本会话消耗，读 WorkBuddy 的
-  `~/.workbuddy/workbuddy.db`（session_usage.credit_json 求和 ÷ 100），与界面
-  「已消耗 ◇x.xx」同口径，随对话自动增长
-- **右下角**：随任务变动轮换的拟人花絮短语（内置 16 条）。WorkBuddy 界面的
-  等待文案是前端随机选的、磁盘上不存在，设备显示的是同风格轮换，不是逐字同步
+- **左下角**：当前会话的上下文占用「上下文 40% · 剩 181K」，读 `session_usage.used/size`，
+  每 15 秒刷新、整百分比变化才刷屏。设置页的「积分余额」是云端数据、本地无缓存，不显示。
+- **右下角**：随任务状态轮换的花絮短语（内置 16 条）。WorkBuddy 界面的等待文案是前端随机
+  选的、磁盘上不存在，设备显示同风格轮换，不逐字同步。
 
-## 写入确认提醒
+## 数据
 
-- WorkBuddy 弹「是否允许写入」权限确认卡时，设备约 10 秒后切换为
-  「等你处理」画面 + 提示音，等待行显示「有写入操作等你确认 · 请回电脑点允许」
-- 依据：Write/Edit/MultiEdit/NotebookEdit 与 mcp__* 调用发起后超过 10 秒没有
-  返回结果——这些工具正常执行都在几秒内完成，卡住基本就是确认卡在等
-- 边界：权限请求不写会话记录、日志无事件，只能这样从侧面推断；写入大文件
-  超过 10 秒会误报一次（点完允许或执行完成即自动恢复）
+`%LOCALAPPDATA%\zectrix-workbuddy-pet\`：
 
-## 待确认提醒（权威信号源）
+- `state.json`：设置、最近 100 条任务、设备地址、已提醒指纹；升级保留。
+- `out\pet-*.png`：`preview` / `init` 渲染的预览图。
+- `out\recordings\*.wav`：设备长按确认键录制的音频（16 kHz 单声道 PCM16）。
+- `watch.log`：守护输出。
 
-- WorkBuddy 主进程在 `~/.workbuddy/logs/main.log` 里登记任务待确认事件，
-  侧边栏「待确认」徽章就是它驱动的：
-  `[TaskNotify] pending: session=<uuid> kind=question|permission` /
-  `[TaskNotify] completed: session=<uuid>`
-- 守护增量 tail 该日志（首次只看最后 512 KiB），任何会话出现待确认——
-  包括**别的会话**（如另一个项目窗口里的权限卡）——其任务都会升级为
-  「等你处理」并成为设备展示的首选任务（current() 有 Waiting 优先逻辑），
-  提示音 + 画面与提问等待一致；确认完成后立即恢复
-- 权限确认卡完全不写会话 JSONL（截图实测），旧启发式（写入工具卡住 10 秒）
-  保留作兜底；Bash 类命令的确认卡只有 main.log 信号能覆盖
-- 附带修复：守护重启后首次导入的游标没记 seen_at/seen_seq，权限卡恰好
-  出现在此刻且会话无新行时永远报不出等待——现在导入时会记下首扫位置
+`state.json` 含设备地址，不要分享；卸载用 `workbuddy-pet forget` 删除。
 
-## 左下角：上下文占用
+## 启动 / 停止 / 卸载 / 更新
 
-- 显示「上下文 40% · 剩 181K」——当前展示会话的上下文已用/窗口，
-  读 `~/.workbuddy/workbuddy.db` 的 session_usage（used/size），本地精确、
-  每 15 秒刷新、随对话实时增长；上下文快满就该新开会话或压缩
-- 之前的「积分余额」是设置页的云端数据，本地无缓存（已实测搜遍），
-  手填快照会失真，已下线；`workbuddy-pet balance` 只提示不再登记
+- **启动**：`workbuddy-pet watch`（后台跟随，可配 `autostart on`）；临时用一次就
+  `workbuddy-pet run`。
+- **停止**：`Ctrl+C`——向设备发送 `close()`、保存状态后退出，不自动重连。
+  后台守护用任务管理器结束 `workbuddy-pet.exe`（强杀后设备约 15 秒才释放租约，属固件行为）。
+- **卸载**：`workbuddy-pet autostart off` → `workbuddy-pet forget` → 删除本项目目录与
+  `%LOCALAPPDATA%\zectrix-workbuddy-pet`；不触碰 WorkBuddy 与设备上的任何数据。
+- **更新**：`cd ..\zectrix-local-push-sdk && git pull`，再回本项目
+  `cargo build --locked --release`；状态缓存保留。
+
+## 已知边界
+
+- WorkBuddy 会话文件与库表格式是逆向适配，不是官方稳定 API；格式变化会失效
+  （表现为「状态待确认」，不会显示错误状态）。
+- 墨水屏只在真实变化时刷新；连续变化会在 2 秒扫描间隔内合并成一次刷新。
+- SDK 不含语音识别 / TTS / 大模型；录音由设备长按确认键触发，存成 WAV。
+- `ResultUnknown` 视为「可能已刷新」，不重发同一帧、不重播音频。
+- 清单进度依赖会话文件能读到 `todo_write`：超过 2 MB 的大会话首次导入只读尾部，
+  历史轮次的清单不算；运行中的任务清单持续追加在尾部，不受影响。
+- 同一设备只允许一个程序管理，切换前先退出旧的；强杀后需等约 15 秒。
+
+## 排障
+
+| 现象 | 处理 |
+|---|---|
+| 连不上 / 超时 | 同局域网、IP 正确、设备开启「待机保持 Wi-Fi」、无其他程序占用 |
+| 刚强杀过进程 | 等 15 秒让固件释放租约 |
+| 中文显示为方块 | 确认 `msyh.ttc` / `msyhbd.ttc` 存在 |
+| 设备停在旧画面 | 系统通知会临时覆盖约 12 秒；`push` 打印「已推送」即设备报告显示完成 |
+| 等待不响铃 | 检查 `--no-sound`、`settings.sound_enabled`；重连后的同一条提醒不会重复响 |
+| 名字不跟着改 | 侧边栏改名写数据库，最多 15 秒后同步；仍不变用 `sessions` 看读取结果 |
