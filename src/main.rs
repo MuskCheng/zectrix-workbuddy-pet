@@ -17,10 +17,6 @@ use workbuddy_pet::{
 };
 use zectrix_sdk::{Device, ImageFormat};
 
-/// 花絮的独立刷新间隔：任务进行中最多每 30 秒采一次界面。
-/// 墨水屏刷新不便宜，而界面本来也是每几秒一换，30 秒已能看出「在动」。
-const QUIP_REFRESH: Duration = Duration::from_secs(30);
-
 fn now() -> i64 {
     chrono::Local::now().timestamp()
 }
@@ -454,17 +450,6 @@ fn scan_into(model: &mut Model, watcher: &mut Watcher) -> (Vec<TaskEvent>, bool)
         Err(e) => eprintln!("读取 WorkBuddy 会话失败: {e}"),
     }
     let mut changed = !applied.is_empty();
-    // 花絮：只在真要推送的时候，去 WorkBuddy 界面读一次当前那条。
-    // 不跟着界面持续轮询——墨水屏刷新贵，而且界面文案每几秒一换，
-    // 推的那一刻读到的就是这一轮该显示的那条。
-    // 读不到（窗口最小化、气泡被关掉、UIA 被占）就保留内置短语池的轮换结果。
-    if changed {
-        if let Some(quip) = uia::current_quip() {
-            if model.set_live_quip(&quip) {
-                println!("[花絮] {quip}");
-            }
-        }
-    }
     // 左下角的上下文占用跟着「当前展示的会话」走：切任务、对话变长都能反映出来。
     // 只在整数百分比变化时触发推送——每 1% 刷一次墨水屏已足够，再多就是闪。
     let now = now();
@@ -566,19 +551,43 @@ async fn scan_and_report(
 
 /// 只在画面签名变化时推送。签名涵盖状态、标题、进度与当前选中项，
 /// 没有真实变化就一个字节都不发——电子墨水屏刷新很贵，也不该无谓闪烁。
+/// 把当前模型渲染上屏；画面没变就不重刷。
+///
+/// 花絮就在这里取：**只有确定要更新页面时**才去 WorkBuddy 界面读一次当前那条，
+/// 读到的内容并进同一帧一起推上去。没有独立的定时轮询——界面自己换了十几条
+/// 而任务状态没变时，设备不跟着闪屏；一旦要更新页面（状态、进度、占用变化，
+/// 或按了键），推上去的就是那一刻界面正在显示的花絮。
 async fn push_if_changed(
     dev: &Device,
-    model: &Model,
+    model: &mut Model,
+    store: &mut Store,
     fonts: &Fonts,
     fmt: ImageFormat,
     frame: usize,
     last_sig: &mut Option<String>,
 ) -> bool {
     let phase = if model.settings.animation { frame } else { 0 };
-    let scene = layout::draw(model, now(), phase);
-    let sig = scene.to_string();
+    let mut scene = layout::draw(model, now(), phase);
+    let mut sig = scene.to_string();
     if last_sig.as_ref() == Some(&sig) {
         return false;
+    }
+    // 真的要刷新页面了，顺带把界面当刻的花絮取回来，和这一帧同步上屏。
+    // 读不到（窗口最小化、气泡已关、UIA 被占）就沿用上一句，绝不阻塞推送。
+    if let Some(quip) = uia::current_quip() {
+        if model.set_live_quip(&quip) {
+            println!("[花絮] {quip}");
+            store.model = model.clone();
+            if let Err(e) = save_store(store) {
+                eprintln!("配置保存失败: {e}");
+            }
+            scene = layout::draw(model, now(), phase);
+            sig = scene.to_string();
+            // 花絮不在这一屏上（比如完成页）时，别为了它白刷一次墨水屏。
+            if last_sig.as_ref() == Some(&sig) {
+                return false;
+            }
+        }
     }
     let png = match raster::to_png(&scene, fonts) {
         Ok(p) => p,
@@ -1105,12 +1114,10 @@ async fn cmd_run(args: &Args) -> Result<()> {
     let mut last_sig: Option<String> = None;
     let mut scan_tick = tokio::time::interval(Duration::from_secs(2));
     scan_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // 花絮单独计时：跟状态扫描解耦，避免每个心跳都去读一次界面。
-    let mut quip_tick = std::time::Instant::now();
 
     // 先扫一次再推：否则会把「还没读到会话」的空画面先刷上屏。
     scan_and_report(&mut model, &mut watcher, &mut store, &dev, false).await;
-    if push_if_changed(&dev, &model, &fonts, fmt, frame, &mut last_sig).await {
+    if push_if_changed(&dev, &mut model, &mut store, &fonts, fmt, frame, &mut last_sig).await {
         frame = (frame + 1) % 6;
     }
     // 首扫静默是为了不把历史回放当成新提醒，但如果此刻屏幕上正停在「等你处理」，
@@ -1142,31 +1149,10 @@ async fn cmd_run(args: &Args) -> Result<()> {
                     continue;
                 }
                 if scan_and_report(&mut model, &mut watcher, &mut store, &dev, true).await
-                    && push_if_changed(&dev, &model, &fonts, fmt, frame, &mut last_sig).await
+                    && push_if_changed(&dev, &mut model, &mut store, &fonts, fmt, frame, &mut last_sig)
+                        .await
                 {
                     frame = (frame + 1) % 6;
-                }
-                // 花絮有独立的一条低速通道：WorkBuddy 把会话记录批量延迟落盘
-                // （实测一轮里几分钟才落一批），只靠上面的状态变化推送，界面上
-                // 换了十几条、设备还是那句老的。这里最多每 30 秒采一次，真变了
-                // 才重推——跟的是「推的时候界面上是什么」，不是逐条镜像。
-                let active = model
-                    .current(now())
-                    .is_some_and(|t| matches!(t.status(), Status::Working | Status::Waiting));
-                if active && quip_tick.elapsed() >= QUIP_REFRESH {
-                    quip_tick = std::time::Instant::now();
-                    if let Some(quip) = uia::current_quip() {
-                        if model.set_live_quip(&quip) {
-                            println!("[花絮] {quip}");
-                            store.model = model.clone();
-                            if let Err(e) = save_store(&store) {
-                                eprintln!("配置保存失败: {e}");
-                            }
-                            if push_if_changed(&dev, &model, &fonts, fmt, frame, &mut last_sig).await {
-                                frame = (frame + 1) % 6;
-                            }
-                        }
-                    }
                 }
             }
             event = dev.next_event() => {
@@ -1183,8 +1169,16 @@ async fn cmd_run(args: &Args) -> Result<()> {
                                 zectrix_sdk::Key::Confirm => model.selected = None,
                             }
                             // 翻页/选项都是用户动作，立刻响应，不等下一次扫描。
-                            if push_if_changed(&dev, &model, &fonts, fmt, frame, &mut last_sig)
-                                .await
+                            if push_if_changed(
+                                &dev,
+                                &mut model,
+                                &mut store,
+                                &fonts,
+                                fmt,
+                                frame,
+                                &mut last_sig,
+                            )
+                            .await
                             {
                                 frame = (frame + 1) % 6;
                             }
