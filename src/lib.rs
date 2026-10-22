@@ -5,4 +5,5 @@ pub mod layout;
 pub mod model;
 pub mod raster;
 pub mod sound;
+pub mod uia;
 pub mod workbuddy;

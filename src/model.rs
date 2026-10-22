@@ -121,8 +121,8 @@ pub struct Model {
     pub ctx_used: Option<u32>,
     #[serde(default)]
     pub ctx_size: Option<u32>,
-    /// 底部花絮短语：WorkBuddy UI 的等待文案是前端随机选的，磁盘上拿不到
-    /// 当次显示的那一条，这里用同风格的拟人短语、任务事件变动时轮换。
+    /// 底部花絮短语。优先用推送时刻从 WorkBuddy 界面读到的真花絮
+    /// （见 `set_live_quip`）；读不到时退回内置短语池轮换。
     #[serde(default)]
     pub quip: String,
     #[serde(skip)]
@@ -167,6 +167,21 @@ fn next_quip(current: &str) -> String {
 /// 花絮短语池（测试与文档用）。
 pub fn quip_pool() -> &'static [&'static str] {
     &QUIPS
+}
+
+/// 花絮在 400×300 画面上只占右下角一条（11 号字、约 214px 宽），
+/// 超过 18 个汉字就会顶到左边的上下文占用标签上。
+const QUIP_MAX_CHARS: usize = 18;
+
+/// 压到一行的宽度内；超长时截断加省略号，而不是任由它撞到左边的标签。
+fn fit_quip(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= QUIP_MAX_CHARS {
+        return chars.into_iter().collect();
+    }
+    let mut out: String = chars[..QUIP_MAX_CHARS - 1].iter().collect();
+    out.push('…');
+    out
 }
 fn valid_id(s: &str) -> bool {
     !s.is_empty()
@@ -283,6 +298,23 @@ impl Model {
             .find(|t| t.source == source && t.event.task_id == task_id)
             .map(|t| t.status())
             .unwrap_or(Status::Unknown)
+    }
+
+    /// 把推送时刻从 WorkBuddy 界面读到的真花絮写上屏。
+    ///
+    /// 只保留拟人短句本身（去掉「准备中」前缀，超长截断），返回画面是否变了。
+    /// 读界面的活由 `uia` 模块负责，这里只做落库判定，便于单测。
+    pub fn set_live_quip(&mut self, quip: &str) -> bool {
+        let quip = fit_quip(quip.trim());
+        // 与池里短语同一标准：至少像个短句，别把空白/分隔符顶上去。
+        if quip.chars().count() < 4 || !quip.chars().any(|c| c.is_alphabetic()) {
+            return false;
+        }
+        if self.quip == quip {
+            return false;
+        }
+        self.quip = quip;
+        true
     }
     pub fn visible(&self, now: i64) -> Vec<Task> {
         let mut tasks: Vec<_> = self
@@ -528,5 +560,23 @@ mod tests {
         let saved = serde_json::to_string(&m).unwrap();
         let restored: Model = serde_json::from_str(&saved).unwrap();
         assert_eq!(restored.current(12).unwrap().status(), Status::Waiting);
+    }
+
+    #[test]
+    fn live_quip_wins_but_still_fits_one_line() {
+        let mut m = Model::default();
+        assert!(m.set_live_quip("你在思考大局，我在打磨细节"));
+        assert_eq!(m.quip, "你在思考大局，我在打磨细节");
+        // 同一条重复采到不算变化，否则同一帧会被反复推。
+        assert!(!m.set_live_quip("你在思考大局，我在打磨细节"));
+        // 界面花絮比内置池长，超宽要截断到 18 字（末位省略号），
+        // 不能顶到左边的上下文占用标签上。
+        assert!(m.set_live_quip("这是一条特别特别特别特别特别特别长的界面花絮短语"));
+        assert_eq!(m.quip.chars().count(), 18);
+        assert!(m.quip.ends_with('…'));
+        // 只有分隔符/空白时不采信，保留原来的句子。
+        let kept = m.quip.clone();
+        assert!(!m.set_live_quip("  ·· "));
+        assert_eq!(m.quip, kept);
     }
 }

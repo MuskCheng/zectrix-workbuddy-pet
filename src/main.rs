@@ -12,7 +12,7 @@ use workbuddy_pet::{
     device, layout,
     model::{Event as TaskEvent, Model, Status, Task},
     raster::{self, Fonts},
-    sound,
+    sound, uia,
     workbuddy::Watcher,
 };
 use zectrix_sdk::{Device, ImageFormat};
@@ -450,6 +450,17 @@ fn scan_into(model: &mut Model, watcher: &mut Watcher) -> (Vec<TaskEvent>, bool)
         Err(e) => eprintln!("读取 WorkBuddy 会话失败: {e}"),
     }
     let mut changed = !applied.is_empty();
+    // 花絮：只在真要推送的时候，去 WorkBuddy 界面读一次「准备中」那条。
+    // 不跟着界面持续轮询——墨水屏刷新贵，而且界面文案本来就是每轮一换，
+    // 推的那一刻读到的就是这一轮该显示的那条。
+    // 读不到（不在准备阶段、窗口最小化、UIA 被占）就保留内置短语池的轮换结果。
+    if changed {
+        if let Some(quip) = uia::preparing_quip() {
+            if model.set_live_quip(&quip) {
+                println!("[花絮] {quip}");
+            }
+        }
+    }
     // 左下角的上下文占用跟着「当前展示的会话」走：切任务、对话变长都能反映出来。
     // 只在整数百分比变化时触发推送——每 1% 刷一次墨水屏已足够，再多就是闪。
     let now = now();
