@@ -10,8 +10,8 @@
 
 ## 与 SDK 的边界
 
-本仓库可单独克隆、编译、测试。它以路径依赖引用官方 [zectrix-local-push-sdk](https://github.com/itopinion/zectrix-local-push-sdk)
-（`../zectrix-local-push-sdk`），**不复制、不修改、不携带** SDK 与固件。
+本仓库以路径依赖引用官方 [zectrix-local-push-sdk](https://github.com/itopinion/zectrix-local-push-sdk)
+（`../zectrix-local-push-sdk`，编译时需并排放一份，见「安装」），**不复制、不修改、不携带** SDK 与固件。
 
 - 宠物仓库负责：任务状态、WorkBuddy 跟随、权限提醒、400×300 像素画面、按键、提示音、
   连接时机与占用策略。
@@ -32,19 +32,68 @@
 
 ## 安装
 
-1. **准备工具链**：Rust（MSVC 工具链）、CMake、Visual Studio C++ Build Tools（SDK 的原生 Opus 需要）。
-2. **取官方 SDK**（放到与本项目同级的目录）：
+只支持 Windows 10/11 x64。安装分两条路：把下面「交给 AI」这一段原样发给 AI 代理，或自己按
+「手动安装」做一遍——两者等价，脚本就是手动步骤的封装。
 
-   ```bat
-   cd D:\repositories
+### 交给 AI（推荐）
+
+复制这段话给 AI 代理，把 `<设备IP>` 换成设备「设置 → 网络同步」里显示的地址（暂时没有设备就删掉这半句）：
+
+> 安装 https://github.com/MuskCheng/zectrix-workbuddy-pet 。克隆到任意目录，在 PowerShell 里执行该仓库的
+> `scripts\install.ps1` 完成构建与测试；构建成功后用 `-DeviceIp <设备IP>` 再执行一次，检查设备、推一张画面、
+> 开启开机自启。把 exe 路径、退出码和测试汇总告诉我，失败就按退出码定位原因，不要改动 SDK 或去掉 `--locked`。
+
+给 AI 的硬约束（照做，不要自行发挥）：
+
+1. **只在 Windows x64 上执行**，macOS / Linux 未验证，别尝试。
+2. 仓库可以克隆到**任意目录**，但 `zectrix-local-push-sdk` 必须位于它的**同级目录**（`Cargo.toml` 里是
+   `path = "../zectrix-local-push-sdk"`）。`install.ps1` 会自动把官方 SDK 克隆到该位置，**不要**移动、改名或修改它。
+3. 执行：
+
+   ```powershell
+   cd <克隆目录>\workbuddy-pet
+   powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+   powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -DeviceIp <设备IP>
+   ```
+
+   第二条会检查设备、推一张画面、写开机自启；**不传 `-DeviceIp` 就完全不碰设备**。
+4. **成功的判定**（三条同时成立）：末尾打印 `DONE`；`target\release\workbuddy-pet.exe` 存在（约 5 MB）；
+   测试汇总为 `45 passed` + `6 passed`、`0 failed`（另有 1 项 `ignored` 需要 WorkBuddy 正在运行）。
+5. **失败按退出码定位**：`1` 工具链缺失（脚本会列出 winget 命令，装完重开终端再跑）｜`2` SDK 克隆失败
+   （网络 / 代理）｜`3` 构建失败（多为 MSVC 缺 C++ 组件，或 `CMAKE_POLICY_VERSION_MINIMUM` 未生效——脚本
+   已设置）｜`4` 测试失败｜`5` 产物缺失｜`6` 连不上设备。
+6. 不要用 `init`（它是交互式引导，会等键盘输入）；非交互等价步骤就是 `check` → `push` → `autostart on`。
+7. 不要改 `Cargo.toml` 的 path 依赖，不要为了「让它过」而删测试，也不要加 `--ignore-rust-version` 之类绕过。
+
+### 手动安装（与脚本等价）
+
+1. **工具链**：Rust（MSVC 工具链）、CMake、Visual Studio C++ Build Tools、Git。
+
+   ```powershell
+   winget install --id Rustlang.Rustup -e
+   winget install --id Kitware.CMake -e
+   winget install --id Git.Git -e
+   winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+   ```
+
+   装完重开终端确认 `cargo -V`、`cmake --version` 可用；`rustup show` 的默认工具链应为
+   `stable-x86_64-pc-windows-msvc`。
+
+2. **取官方 SDK 到同级目录**：
+
+   ```powershell
+   cd <你想放的目录>
+   git clone https://github.com/MuskCheng/zectrix-workbuddy-pet.git
    git clone https://github.com/itopinion/zectrix-local-push-sdk.git
    ```
 
-3. **构建**：
+   两条命令在同一个目录下执行：`workbuddy-pet` 与 `zectrix-local-push-sdk` 必须并排。
 
-   ```bat
-   cd D:\repositories\workbuddy-pet
-   set CMAKE_POLICY_VERSION_MINIMUM=3.5
+3. **构建 + 测试**（首次需联网拉依赖，并编译 SDK 内置的 Opus，约 3–8 分钟）：
+
+   ```powershell
+   cd zectrix-workbuddy-pet
+   $env:CMAKE_POLICY_VERSION_MINIMUM = '3.5'
    cargo test --locked --release
    cargo build --locked --release
    ```
@@ -53,17 +102,18 @@
    「Compatibility with CMake < 3.5 has been removed」。这是 SDK README 给的处理办法。
    产物是 `target\release\workbuddy-pet.exe`。
 
-4. **首次初始化**：`workbuddy-pet init` 会依次检查现状（数据目录、WorkBuddy 会话、已存地址、
-   跟随与声音设置）→ 自动发现并连接设备（打印型号、电量、信号）→ 渲染预览到
-   `%LOCALAPPDATA%\zectrix-workbuddy-pet\out\pet-init.png` → **你确认后**才推第一张画面 →
-   询问是否开机自启。在此之前设备不会被动到。
-5. **日常使用**：
+4. **接设备**（`<IP>` 见设备「设置 → 网络同步」）：
 
-   ```bat
-   workbuddy-pet autostart on --target 192.168.1.100
+   ```powershell
+   .\target\release\workbuddy-pet.exe check  --target <IP>   # 只核对，不推画面
+   .\target\release\workbuddy-pet.exe push   --target <IP>   # 推一张确认版式
+   .\target\release\workbuddy-pet.exe autostart on --target <IP>
    ```
 
-   之后登录 Windows 就在后台待命，有任务才占用设备。升级保留现有设置与任务记录。
+   想走交互式引导（生成预览、逐项询问）就用 `workbuddy-pet init`。
+
+5. **日常使用**：登录 Windows 后在后台待命，有任务才占用设备。升级保留现有设置与任务记录；
+   覆盖 exe 后重启一次守护（`autostart` 无需重设）。
 
 接入时核对到的基线：参照项目 [zectrix-agent-pet](https://github.com/itopinion/zectrix-agent-pet)
 （核查日期 2026-10-20，参考提交 `2c9213d`）、[SDK API 文档](https://github.com/itopinion/zectrix-local-push-sdk/blob/main/docs/API.md)、
@@ -150,7 +200,8 @@ cargo test --locked --release
 cargo build --locked --release
 ```
 
-46 项测试（状态机、标题解析、去抖、占用判定、版式、提示音）。模块分工：
+51 项测试（状态机、标题解析、去抖、占用判定、版式、提示音、花絮定位；另 1 项真机探针需
+WorkBuddy 正在运行，默认忽略）。模块分工：
 `model`（状态机与任务表）、`workbuddy`（本机数据源与信号源）、`layout` + `raster`（场景与灰度 PNG）、
 `sound`（PCM16 合成）、`device`（SDK 封装）、`main`（命令、占用策略、推送循环）。
 
@@ -172,7 +223,10 @@ cargo build --locked --release
 
 | 现象 | 处理 |
 | --- | --- |
-| 构建报 CMake < 3.5 兼容错误 | 设 `CMAKE_POLICY_VERSION_MINIMUM=3.5` 后重试 |
+| `install.ps1` 退出码 1 | 按脚本打印的 winget 命令装工具链，**重开终端**再跑；VS Build Tools 必须含「使用 C++ 的桌面开发」 |
+| 构建报 `link.exe` 找不到 / MSVC 缺失 | 装 VS Build Tools 的 VCTools 工作负载，或用「x64 Native Tools」命令提示符重跑 |
+| 构建报 CMake < 3.5 兼容错误 | 设 `CMAKE_POLICY_VERSION_MINIMUM=3.5` 后重试（脚本已自动设置） |
+| 克隆 SDK 失败（TLS / 超时） | 检查代理；可试 `git config --global http.sslBackend schannel` 后重试 |
 | `--locked` 报锁文件不一致 | 只在确实改过依赖时去掉 `--locked` 更新 `Cargo.lock` |
 | 连不上 / 超时 | 确认同局域网、IP 正确、设备已开「待机保持 Wi-Fi」、没有别的程序占用 |
 | 刚强杀过进程 | 等 15 秒让固件释放租约 |
