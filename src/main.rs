@@ -1360,7 +1360,7 @@ fn usage() {
   workbuddy-pet run     [--target IP|ID] [--format F] [--volume 0-100] [--no-sound] [--no-animation]
                                                           常驻：跟随状态、按键翻页、提示音
   workbuddy-pet watch   [--target IP|ID] [--idle-grace 秒]         守护：WorkBuddy 一启动就待命，有任务才占用设备，
-                                                          任务结束静默 N 秒（默认 60）后交还并回到待命
+                                                          任务结束 5 分钟内没有新任务即交还并回到待命
   workbuddy-pet autostart on|off|status [--target IP|ID]           开机自启（写启动文件夹，后台待命）
   workbuddy-pet where                                              显示数据与配置路径
   workbuddy-pet forget                                             删除本机状态缓存
