@@ -151,8 +151,9 @@ Write-Host ''
 Write-Host 'DONE' -ForegroundColor Green
 Info "exe     : $exe"
 Info 'next    : start WorkBuddy, then run one of these:'
-Info '            workbuddy-pet watch                 # follow tasks until you press Ctrl+C'
-Info '            workbuddy-pet autostart on --target <IP>   # run in background at login'
+Info "            & `"$exe`" watch                          # follow tasks until you press Ctrl+C"
+Info "            & `"$exe`" autostart on --target <IP>      # run in background at login"
+Info '          (PowerShell needs the & before a quoted path; cmd does not)'
 if ($DeviceIp -eq '') {
     Info 'device  : not touched. Re-run with -DeviceIp <IP> to check, push and enable autostart.'
 }

@@ -208,6 +208,17 @@ Start-Sleep 9                                                # 固件释放单�
 - exe 会复制到 `%LOCALAPPDATA%\zectrix-workbuddy-pet\bin\`，自启项指向副本——`cargo clean`
   或移动仓库都不会让自启变成空指针。
 
+装好之后要调命令，先切到副本目录再跑（PowerShell 与 cmd 都适用）：
+
+```powershell
+cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
+.\workbuddy-pet.exe autostart status
+```
+
+不想切目录就加调用运算符 `&`：`& "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin\workbuddy-pet.exe" autostart status`。
+**直接写 `"%LOCALAPPDATA%\...\workbuddy-pet.exe" autostart on` 会报「意外的标记」**——
+这种写法只在 cmd 里成立；PowerShell 把带引号的路径当字符串，后面跟的参数就成了语法错误，与程序无关。
+
 ## 本机 WorkBuddy 跟随
 
 守护启动即跟随本机会话，无需额外开关。它只读三处本机数据，全部只取元数据：
@@ -273,6 +284,7 @@ WorkBuddy 正在运行，默认忽略）。模块分工：
 
 | 现象 | 处理 |
 | --- | --- |
+| PowerShell 报「表达式或语句中包含意外的标记 `autostart`」 | 带引号的路径必须加 `&`：`& "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin\workbuddy-pet.exe" autostart on`；或先 `cd` 到该目录再用 `.\workbuddy-pet.exe`。`"路径" 参数` 是 cmd 写法，PowerShell 不认 |
 | `install.ps1` 退出码 1 | 按脚本打印的 winget 命令装工具链，**重开终端**再跑；VS Build Tools 必须含「使用 C++ 的桌面开发」 |
 | 构建报 `link.exe` 找不到 / MSVC 缺失 | 装 VS Build Tools 的 VCTools 工作负载，或用「x64 Native Tools」命令提示符重跑 |
 | 构建报 CMake < 3.5 兼容错误 | 设 `CMAKE_POLICY_VERSION_MINIMUM=3.5` 后重试（脚本已自动设置） |

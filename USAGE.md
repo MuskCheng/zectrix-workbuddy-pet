@@ -125,6 +125,17 @@ workbuddy-pet autostart on --target 192.168.1.100
 `autostart status` 会分别报看门狗与守护的 PID 和心跳年龄；`autostart off` 先停看门狗
 再停守护（顺序反了会被立刻补回来），并移除登录项。
 
+装好之后，想用副本再调命令，PowerShell 里这样调（cmd 也能用 `cd /d` 后同上写法）：
+
+```powershell
+cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
+.\workbuddy-pet.exe autostart status
+```
+
+不切目录就得加调用运算符：`& "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin\workbuddy-pet.exe" autostart on`。
+`"%LOCALAPPDATA%\...\workbuddy-pet.exe" autostart on` 这种 cmd 写法在 PowerShell 里会报
+「表达式或语句中包含意外的标记」——PowerShell 把带引号的路径当字符串，不是命令。
+
 推送节流：每 2 秒扫一次会话，只有状态、标题、进度或选中项真的变了才刷屏；
 没有变化一帧都不发。`animation` 关闭时画面完全静止，仅状态变化或手动翻页才更新。
 
