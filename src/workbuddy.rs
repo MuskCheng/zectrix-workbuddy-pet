@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -132,10 +132,10 @@ struct Cursor {
     carry: Vec<u8>,
     task: Option<String>,
     turn: u32,
-    /// 会话级标题（WorkBuddy 写的 `ai-title`）。整个会话共用一个，所以它只能当
-    /// 兜底——拿它当「当前任务名称」会一直停在会话最早那个名字上。
+    /// 会话级标题（WorkBuddy 写的 `ai-title`）。与侧边栏显示的是同一个名字，
+    /// 上屏优先用它，保持两边一致；改名/重新生成都能通过增量读取跟上。
     title: String,
-    /// 本轮用户真正问了什么，逐轮更新，上屏用它。
+    /// 本轮用户真正问了什么，逐轮更新。仅在会话没有标题时作兜底。
     turn_title: Option<String>,
     emitted: Option<(Status, String, Option<u8>, String)>,
     last: Last,
@@ -156,16 +156,18 @@ struct Cursor {
     seen_seq: u64,
 }
 
-/// 大文件只读尾部，标题会落在被跳过的头部；单独扫一段文件头把标题捞回来。
-fn head_title(path: &Path) -> Option<String> {
-    const HEAD: usize = 256 * 1024;
-    let mut f = File::open(path).ok()?;
-    let mut buf = vec![0u8; HEAD];
-    let n = f.read(&mut buf).ok()?;
-    buf.truncate(n);
+/// 大文件只读尾部，标题可能落在被跳过的区段。全文件扫一遍，但只对含
+/// `ai-title` 字节的行做 JSON 解析（这类记录整个会话只有几条，其余行纯字节过滤），
+/// 取最后一条——侧边栏显示的就是最新生成的标题。
+fn scan_title(path: &Path) -> Option<String> {
+    let f = File::open(path).ok()?;
     let mut title = None;
-    for line in buf.split(|b| *b == b'\n') {
-        let Ok(v) = serde_json::from_slice::<Value>(line) else {
+    for line in std::io::BufReader::new(f).split(b'\n') {
+        let Ok(line) = line else { continue };
+        if !line.windows(8).any(|w| w == b"ai-title") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(&line) else {
             continue;
         };
         if v["type"].as_str() == Some("ai-title") {
@@ -455,12 +457,16 @@ impl Cursor {
         let now = now_secs();
         let status = self.status(now)?;
         let task = self.task.clone()?;
-        let title = match self.turn_title.as_deref() {
-            // 本轮提问优先：这才是「当前任务」的名字。
-            Some(t) if !t.trim().is_empty() => t.to_string(),
-            // 没有提问正文（老格式会话）时才退到会话标题/项目名。
-            _ if self.title.is_empty() => fallback.to_string(),
-            _ => self.title.clone(),
+        let title = if !self.title.is_empty() {
+            // 会话标题优先：与 WorkBuddy 侧边栏显示的同一个名字，两边保持一致。
+            // 增量读取会跟踪 mid-file 的 ai-title 记录，改名/重新生成都会跟上。
+            self.title.clone()
+        } else {
+            match self.turn_title.as_deref() {
+                // 没有会话标题时退到本轮提问，再退到项目名。
+                Some(t) if !t.trim().is_empty() => t.to_string(),
+                _ => fallback.to_string(),
+            }
         };
         let progress = self.progress();
         // 没有清单百分比时，进度条区域改上最近工具活动的文字描述，
@@ -690,10 +696,10 @@ impl Watcher {
             {
                 let cursor = self.cursors.entry(path.clone()).or_default();
                 if fresh && size > MAX_INITIAL {
-                    // 只读尾部，并且丢掉被截断的首行；标题单独从文件头取回。
+                    // 只读尾部，并且丢掉被截断的首行；标题由 scan_title 全文件补回。
                     cursor.offset = size - MAX_INITIAL;
                     skip_partial = true;
-                    if let Some(t) = head_title(&path) {
+                    if let Some(t) = scan_title(&path) {
                         cursor.title = t;
                     }
                 }
@@ -939,8 +945,8 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_name_changes_when_a_new_task_starts() {
-        // 会话级 ai-title 只有一个，整段会话不能都叫这个名字。
+    fn the_screen_name_matches_the_sidebar_session_title() {
+        // 有会话标题时与侧边栏保持一致：整段会话都叫这个名字。
         let root = temp_root("turn-title");
         let mut w = Watcher::new(root.clone());
         append(
@@ -954,22 +960,45 @@ mod tests {
             ],
         );
         let first = w.scan().unwrap();
-        assert_eq!(first.last().unwrap().0.title, "先看看 SDK");
+        assert_eq!(
+            first.last().unwrap().0.title,
+            "查看 Zectrix 本地推送 SDK 项目"
+        );
         append(
             &root,
-            &[user(
-                "<system-reminder>x</system-reminder>\n<user_query>推送到 GitHub</user_query>",
-                1_700_000_060_000,
-            )],
+            &[
+                user(
+                    "<system-reminder>x</system-reminder>\n<user_query>推送到 GitHub</user_query>",
+                    1_700_000_060_000,
+                ),
+                // 侧边栏改名（新的 ai-title 记录）后，屏幕要跟着换。
+                json!({"type":"ai-title","aiTitle":"完整测试全流程","timestamp":1_700_000_061_000i64}),
+            ],
         );
         let evs = w.scan().unwrap();
         assert!(
-            evs.iter().any(|(e, _)| e.title == "推送到 GitHub"),
-            "新一轮的任务名必须换成这一轮的提问：{:?}",
+            evs.iter().any(|(e, _)| e.title == "完整测试全流程"),
+            "侧边栏改名后任务名必须跟上：{:?}",
             evs.iter()
                 .map(|(e, _)| (e.task_id.clone(), e.title.clone()))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn without_a_session_title_falls_back_to_the_question() {
+        // 没有任何 ai-title 记录（老格式会话）才退到本轮提问。
+        let root = temp_root("no-title");
+        let mut w = Watcher::new(root.clone());
+        append(
+            &root,
+            &[user(
+                "<system-reminder>x</system-reminder>\n<user_query>先看看 SDK</user_query>",
+                1_700_000_000_000,
+            )],
+        );
+        let first = w.scan().unwrap();
+        assert_eq!(first.last().unwrap().0.title, "先看看 SDK");
     }
 
     #[test]
@@ -1095,8 +1124,8 @@ mod tests {
         let first = w.scan().unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].0.status, Status::Working);
-        // 上屏用这一轮的提问，而不是会话级 ai-title（后者整段会话只有一个）。
-        assert_eq!(first[0].0.title, "开始");
+        // 上屏用会话级 ai-title（与侧边栏一致），本轮提问只作兜底。
+        assert_eq!(first[0].0.title, "接入宠物状态");
         // 轮次 ID 来自用户消息时间戳（秒）。
         assert_eq!(first[0].0.task_id, "sess-0001-u1700000000");
 

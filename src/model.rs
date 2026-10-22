@@ -230,7 +230,20 @@ impl Model {
             .iter_mut()
             .find(|t| t.source == source && t.event.task_id == event.task_id)
         {
-            if event.seq <= t.event.seq {
+            if event.seq < t.event.seq {
+                return Ok(false);
+            }
+            if event.seq == t.event.seq {
+                // 同一条记录被重新推导（守护重启后的全新扫描）：记录本身没变，
+                // 但派生字段可能变了——最典型的是会话标题在会话中途被重新生成，
+                // 重新扫描才第一次读到。内容有变就更新文案，完全一致才去重。
+                if event.status == t.event.status {
+                    if event.title != t.event.title || event.detail != t.event.detail {
+                        t.event.title = event.title;
+                        t.event.detail = event.detail;
+                        return Ok(true);
+                    }
+                }
                 return Ok(false);
             }
             // 会话文件会把上一轮的完成记录延迟补写进下一轮（实测存在）：
