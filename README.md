@@ -51,7 +51,7 @@
 3. 执行：
 
    ```powershell
-   cd <克隆目录>\workbuddy-pet
+   cd <克隆目录>\zectrix-workbuddy-pet
    powershell -ExecutionPolicy Bypass -File scripts\install.ps1
    powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -DeviceIp <设备IP>
    ```
@@ -87,7 +87,7 @@
    git clone https://github.com/itopinion/zectrix-local-push-sdk.git
    ```
 
-   两条命令在同一个目录下执行：`workbuddy-pet` 与 `zectrix-local-push-sdk` 必须并排。
+   两条命令在同一个目录下执行：`zectrix-workbuddy-pet` 与 `zectrix-local-push-sdk` 必须并排。
 
 3. **构建 + 测试**（首次需联网拉依赖，并编译 SDK 内置的 Opus，约 3–8 分钟）：
 
@@ -106,9 +106,12 @@
 
    ```powershell
    .\target\release\workbuddy-pet.exe check  --target <IP>   # 只核对，不推画面
-   .\target\release\workbuddy-pet.exe push   --target <IP>   # 推一张确认版式
+   .\target\release\workbuddy-pet.exe push   --target <IP>   # 推一张确认版式（与上一条隔 8 秒以上）
    .\target\release\workbuddy-pet.exe autostart on --target <IP>
    ```
+
+   设备只允许一个连接，固件在断开后约 8 秒才释放租约：连着跑 `check` 和 `push` 会拿到
+   「设备忙碌」，隔开或重试一次即可（`install.ps1` 已在两处之间等待并自动重试一次）。
 
    想走交互式引导（生成预览、逐项询问）就用 `workbuddy-pet init`。
 
@@ -230,6 +233,8 @@ WorkBuddy 正在运行，默认忽略）。模块分工：
 | `--locked` 报锁文件不一致 | 只在确实改过依赖时去掉 `--locked` 更新 `Cargo.lock` |
 | 连不上 / 超时 | 确认同局域网、IP 正确、设备已开「待机保持 Wi-Fi」、没有别的程序占用 |
 | 刚强杀过进程 | 等 15 秒让固件释放租约 |
+| `check` 之后紧接着 `push` 报「设备忙碌」 | 断开后约 8 秒才释放租约，隔开或重试一次（脚本已处理） |
+| 输出中文乱码 | 先 `chcp 65001`，或在 PowerShell 里 `[Console]::OutputEncoding=[Text.Encoding]::UTF8` 再重跑 |
 | 中文显示为方块 | 确认 `C:\Windows\Fonts\msyh.ttc`、`msyhbd.ttc` 存在 |
 | 设备停在旧画面 | 系统通知会临时覆盖约 12 秒；`push` 打印「已推送」即设备报告显示完成 |
 

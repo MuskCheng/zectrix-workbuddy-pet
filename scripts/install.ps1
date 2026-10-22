@@ -24,6 +24,9 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+# The exe prints UTF-8; without this, redirections and older consoles turn its
+# Chinese output into mojibake, which hides the verification lines.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $script:repo = Split-Path -Parent $PSScriptRoot
 $script:sdk = Join-Path (Split-Path -Parent $script:repo) 'zectrix-local-push-sdk'
 $script:sdkUrl = 'https://github.com/itopinion/zectrix-local-push-sdk.git'
@@ -128,8 +131,17 @@ if ($DeviceIp -ne '') {
         Fail 6 'device check failed: same LAN? right IP? "Settings > Network sync > keep Wi-Fi in standby" on? another program holding the device?'
     }
     Info 'pushing one frame'
+    # The firmware keeps the single connection for a few seconds after a clean
+    # close (measured: Busy at t+0, accepted at t+8), so do not push back to
+    # back with the check above.
+    Start-Sleep -Seconds 8
     & $exe push --target $DeviceIp
-    if ($LASTEXITCODE -ne 0) { Fail 6 'push failed' }
+    if ($LASTEXITCODE -ne 0) {
+        Info 'device may still hold the lease, retrying once after 8s'
+        Start-Sleep -Seconds 8
+        & $exe push --target $DeviceIp
+        if ($LASTEXITCODE -ne 0) { Fail 6 'push failed twice: device busy or unreachable' }
+    }
     Info 'enabling autostart'
     & $exe autostart on --target $DeviceIp
     if ($LASTEXITCODE -ne 0) { Fail 6 'autostart failed' }
