@@ -33,9 +33,16 @@
 
 ## 安装
 
-只支持 Windows 10/11 x64。三条路，按省事程度排：
+只支持 Windows 10/11 x64。安装分两步：**先拿到程序**（下面三条路选一条），**再开启跟随**
+（三条路都要做，只有一句 `autostart on`）。
 
-### 下载即用（最快，无需编译）
+**第二步不能省**。不开启跟随，程序不会自己出现在设备上：只有你手动 `push` / `run` 才有画面，
+关掉终端就停了。开启之后看门狗常驻后台，WorkBuddy 一出现就跟随、有任务才占用设备，
+开机登录后也会自动回来。
+
+### 一、拿到程序（三选一）
+
+#### 下载即用（最快，无需编译）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
 `workbuddy-pet-0.1.3-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
@@ -45,7 +52,7 @@
 .\workbuddy-pet-0.1.3-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
 Start-Sleep 9                                                # 固件释放单连接约需 8 秒
 .\workbuddy-pet-0.1.3-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
-.\workbuddy-pet-0.1.3-windows-x64.exe autostart on --target <IP>
+.\workbuddy-pet-0.1.3-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
 ```
 
 下载页同时给出 `SHA256SUMS.txt`，可核对文件完整性：
@@ -57,11 +64,9 @@ Start-Sleep 9                                                # 固件释放单�
 二进制仍然**只是宠物程序**：它读本机 WorkBuddy 的会话数据，并直接连局域网里的 Note 4；
 不会安装驱动、不写系统目录、不需要管理员权限（开机自启写在当前用户的启动文件夹）。
 
-升级就是下载新 exe 再跑一次 `autostart on`：它先停掉旧版本、把副本换成新版本、再重启看门狗，
-不用手动 `off`；`autostart` 指向的是副本路径，不用重设；设置与任务记录都在
-`%LOCALAPPDATA%\zectrix-workbuddy-pet` 里，换 exe 不会丢。
+上面那次 `push` 只是确认版式，之后设备不会再自动更新——要让它跟随任务，必须走下一节。
 
-### 交给 AI 编译（要改代码时）
+#### 交给 AI 编译（要改代码时）
 
 把下面这一段原样发给 AI 代理，或自己按「手动安装」做一遍——两者等价，脚本就是手动步骤的封装。
 
@@ -69,7 +74,8 @@ Start-Sleep 9                                                # 固件释放单�
 
 > 安装 https://github.com/MuskCheng/zectrix-workbuddy-pet 。克隆到任意目录，在 PowerShell 里执行该仓库的
 > `scripts\install.ps1` 完成构建与测试；构建成功后用 `-DeviceIp <设备IP>` 再执行一次，检查设备、推一张画面、
-> 开启开机自启。把 exe 路径、退出码和测试汇总告诉我，失败就按退出码定位原因，不要改动 SDK 或去掉 `--locked`。
+> 开启跟随（`autostart on`，装副本与开机自启并拉起看门狗）。最后跑 `autostart status`，把 exe 路径、
+> 退出码、测试汇总和 status 输出告诉我；失败就按退出码定位原因，不要改动 SDK 或去掉 `--locked`。
 
 给 AI 的硬约束（照做，不要自行发挥）：
 
@@ -86,14 +92,14 @@ Start-Sleep 9                                                # 固件释放单�
 
    第二条会检查设备、推一张画面、写开机自启；**不传 `-DeviceIp` 就完全不碰设备**。
 4. **成功的判定**（三条同时成立）：末尾打印 `DONE`；`target\release\workbuddy-pet.exe` 存在（约 5 MB）；
-   测试汇总为 `45 passed` + `6 passed`、`0 failed`（另有 1 项 `ignored` 需要 WorkBuddy 正在运行）。
+   测试汇总为 `45 passed` + `7 passed`、`0 failed`（另有 1 项 `ignored` 需要 WorkBuddy 正在运行）。
 5. **失败按退出码定位**：`1` 工具链缺失（脚本会列出 winget 命令，装完重开终端再跑）｜`2` SDK 克隆失败
    （网络 / 代理）｜`3` 构建失败（多为 MSVC 缺 C++ 组件，或 `CMAKE_POLICY_VERSION_MINIMUM` 未生效——脚本
    已设置）｜`4` 测试失败｜`5` 产物缺失｜`6` 连不上设备。
 6. 不要用 `init`（它是交互式引导，会等键盘输入）；非交互等价步骤就是 `check` → `push` → `autostart on`。
 7. 不要改 `Cargo.toml` 的 path 依赖，不要为了「让它过」而删测试，也不要加 `--ignore-rust-version` 之类绕过。
 
-### 手动安装（与脚本等价）
+#### 手动安装（与脚本等价）
 
 1. **工具链**：Rust（MSVC 工具链）、CMake、Visual Studio C++ Build Tools、Git。
 
@@ -135,7 +141,6 @@ Start-Sleep 9                                                # 固件释放单�
    ```powershell
    .\target\release\workbuddy-pet.exe check  --target <IP>   # 只核对，不推画面
    .\target\release\workbuddy-pet.exe push   --target <IP>   # 推一张确认版式（与上一条隔 8 秒以上）
-   .\target\release\workbuddy-pet.exe autostart on --target <IP>
    ```
 
    设备只允许一个连接，固件在断开后约 8 秒才释放租约：连着跑 `check` 和 `push` 会拿到
@@ -143,13 +148,73 @@ Start-Sleep 9                                                # 固件释放单�
 
    想走交互式引导（生成预览、逐项询问）就用 `workbuddy-pet init`。
 
-5. **日常使用**：登录 Windows 后在后台待命，有任务才占用设备。升级保留现有设置与任务记录；
+5. **开启跟随**（别忘这一步，详见下一节）：
+
+   ```powershell
+   .\target\release\workbuddy-pet.exe autostart on --target <IP>
+   ```
+
+6. **日常使用**：登录 Windows 后在后台待命，有任务才占用设备。升级保留现有设置与任务记录；
    覆盖 exe 后重启一次守护（`autostart` 无需重设）。
 
 接入时核对到的基线：参照项目 [zectrix-agent-pet](https://github.com/itopinion/zectrix-agent-pet)
 （核查日期 2026-10-20，参考提交 `2c9213d`）、[SDK API 文档](https://github.com/itopinion/zectrix-local-push-sdk/blob/main/docs/API.md)、
 [兼容性清单](https://github.com/itopinion/zectrix-local-push-sdk/blob/main/compatibility.json)。
 **执行前请重新核对当前版本**，接口以当前源码为准。
+
+### 二、开启跟随（必做）
+
+三条路走到这里都一样，只差一句命令。`<IP>` 是设备「设置 → 网络同步」里显示的地址，
+会记进 `state.json`，之后不用再带：
+
+```powershell
+# 下载即用
+.\workbuddy-pet-0.1.3-windows-x64.exe autostart on --target <IP>
+# 编译安装
+.\target\release\workbuddy-pet.exe autostart on --target <IP>
+```
+
+它做四件事：
+
+1. 把当前 exe 复制到 `%LOCALAPPDATA%\zectrix-workbuddy-pet\bin\workbuddy-pet.exe`，自启项指向这份**副本**
+   （`cargo clean`、移动仓库都不会让它失效）
+2. 在启动文件夹写 `zectrix-workbuddy-pet.vbs`，登录时隐藏窗口拉起看门狗 `supervise`
+3. **立刻**启动看门狗，不用等到下次登录；它每 10 秒看一次守护心跳，守护不在就补一份
+4. 记住目标 IP
+
+跟随的是 **WorkBuddy 的状态**，不是「开机就推」：守护启动即读本机会话，WorkBuddy 没开就待命、
+不占用设备；WorkBuddy 一有任务才连设备上屏。所以它既随登录自启，也随 WorkBuddy 出现而跟随。
+
+**装完核对**。副本已经装好，直接调它（在 PowerShell 里带引号的路径要加 `&`，或先 `cd` 进目录）：
+
+```powershell
+cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
+.\workbuddy-pet.exe autostart status
+```
+
+四项都对上才算装好：
+
+```
+自启项：已启用（C:\Users\<你>\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\zectrix-workbuddy-pet.vbs）
+守护程序：C:\Users\<你>\AppData\Local\zectrix-workbuddy-pet\bin\workbuddy-pet.exe
+看门狗：运行中（pid 12345，心跳 3 秒前）
+守护进程：运行中（pid 12346，心跳 3 秒前）
+```
+
+心跳超过 20 秒算过期；只要看门狗还在，它会自己把守护补回来（实测杀掉守护约 20 秒恢复）。
+如果看门狗显示「已停止」，重跑一次上面的 `autostart on` 即可。
+
+**不想跟随了**：
+
+```powershell
+.\workbuddy-pet.exe autostart off
+```
+
+它先停看门狗再停守护，最后删掉自启项。顺序不能反——先停守护的话，看门狗会在 10 秒内把它补回来
+（手动在任务管理器里结束守护也一样会回来，属正常行为）。
+
+**升级**：下载新 exe 再跑一次 `autostart on`。它会先停掉旧版本、替换副本、重启看门狗，不用手动 `off`；
+设置与任务记录都在 `%LOCALAPPDATA%\zectrix-workbuddy-pet`，换 exe 不会丢。
 
 完整命令、按键与提示音细节见 [USAGE.md](USAGE.md)。
 
@@ -204,9 +269,7 @@ Start-Sleep 9                                                # 固件释放单�
 
 - 守护每 5 秒写 `daemon.hb`，心跳超过 20 秒没更新即视为死亡；实测被杀后约 20 秒恢复。
 - 守护用 `daemon.lock`（PID）保证单实例，重复拉起时后来者静默退出。
-- `autostart on` 会立刻启动看门狗，不必等下次登录；`autostart status` 分别报两者的 PID 与心跳年龄。
-- exe 会复制到 `%LOCALAPPDATA%\zectrix-workbuddy-pet\bin\`，自启项指向副本——`cargo clean`
-  或移动仓库都不会让自启变成空指针。
+- 这套自启由 `autostart on` 一次性装好，写入细节与装完怎么核对见「安装 → 二、开启跟随」。
 
 装好之后要调命令，先切到副本目录再跑（PowerShell 与 cmd 都适用）：
 

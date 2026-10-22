@@ -102,6 +102,9 @@ workbuddy-pet forget                             删除本机状态缓存
 
 ## 自动跟随
 
+**首次部署的最后一步就是它**：不执行 `autostart on`，程序只在手动 `push` / `run` 时才有画面，
+关掉终端就停了，设备不会跟着 WorkBuddy 更新。
+
 ```bat
 workbuddy-pet autostart on --target 192.168.1.100
 ```
