@@ -1,6 +1,10 @@
 MIT License
 
-Copyright (c) 2026 ZECTRIX
+Copyright (c) 2026 MuskCheng
+
+Portions of the model/layout/sound logic are derived from zectrix-agent-pet
+(https://github.com/itopinion/zectrix-agent-pet), Copyright (c) 2026 ZECTRIX,
+likewise released under the MIT License.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
