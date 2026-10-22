@@ -1,9 +1,9 @@
 # WorkBuddy 宠物（ZECTRIX Note 4）
 
-![宠物实机画面：正在工作中](docs/preview@2x.png)
+![宠物实机画面：正在工作中](docs/preview.png)
 
-*实机画面 400×300（此处放大 2 倍展示）。上图为一次真实推送：任务进行中、
-宠物在工作、底部是上下文占用与随机花絮。重新生成：`workbuddy-pet preview --out docs/preview.png`。*
+*实机画面原尺寸 400×300，未放大。上图为一次真实推送：任务进行中、宠物在工作、
+底部是上下文占用与随机花絮。重新生成：`workbuddy-pet preview --out docs/preview.png`。*
 
 把本机 WorkBuddy 的任务状态推到你桌上的墨水屏：一台 400×300 的电子纸显示一只像素宠物，
 工作中它在动、需要你处理时它举牌、任务完成时它收工。程序在本机运行，直连局域网里的设备，
