@@ -132,7 +132,11 @@ struct Cursor {
     carry: Vec<u8>,
     task: Option<String>,
     turn: u32,
+    /// 会话级标题（WorkBuddy 写的 `ai-title`）。整个会话共用一个，所以它只能当
+    /// 兜底——拿它当「当前任务名称」会一直停在会话最早那个名字上。
     title: String,
+    /// 本轮用户真正问了什么，逐轮更新，上屏用它。
+    turn_title: Option<String>,
     emitted: Option<(Status, String, Option<u8>, String)>,
     last: Last,
     /// callId -> (工具名, 发起记录的时间戳秒)，记录等待型调用；拿到结果即移除。
@@ -174,6 +178,54 @@ fn head_title(path: &Path) -> Option<String> {
         }
     }
     title
+}
+
+/// 去掉宿主注入的 `<system-reminder>…</system-reminder>` 上下文块。
+/// 这些块里是模式说明、当前时间、记忆提醒，不是用户问的话。
+fn strip_reminders(text: &str) -> String {
+    const OPEN: &str = "<system-reminder";
+    const CLOSE: &str = "</system-reminder>";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        match rest[start..].find(CLOSE) {
+            Some(end) => rest = &rest[start + end + CLOSE.len()..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 这一轮用户真正问了什么：取提问的第一行，作为「当前任务名称」上屏。
+/// 优先读 `<user_query>` 标签里的正文；老格式没有标签时，退回去掉提醒块后的首行。
+/// 只取一行且限长——设备画面只有三行标题位，用户自己也不想看一整段。
+fn user_title(v: &Value) -> Option<String> {
+    let text = v["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        return None;
+    }
+    let body = match (text.rfind("<user_query>"), text.rfind("</user_query>")) {
+        (Some(a), Some(b)) if b > a => text[a + "<user_query>".len()..b].to_string(),
+        _ => strip_reminders(&text),
+    };
+    let line = body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('<'))?;
+    let t = clean(line, 36);
+    if t.trim().is_empty() {
+        None
+    } else {
+        Some(t)
+    }
 }
 
 fn now_secs() -> i64 {
@@ -237,6 +289,9 @@ impl Cursor {
                         };
                         if new_turn {
                             self.turn += 1;
+                            // 任务名跟着这一轮的提问走：会话级 ai-title 一整个
+                            // 会话只生成一两次，拿它当任务名会一直停在旧名字上。
+                            self.turn_title = user_title(v);
                             // 轮次 ID 用用户消息时间戳：大文件只读尾部时序号会从
                             // 截断点重新计数，与缓存里的旧轮次撞号会被 seq 规则拒绝。
                             // 时间戳天然唯一，跨重启、跨截断都稳定。
@@ -400,10 +455,12 @@ impl Cursor {
         let now = now_secs();
         let status = self.status(now)?;
         let task = self.task.clone()?;
-        let title = if self.title.is_empty() {
-            fallback.to_string()
-        } else {
-            self.title.clone()
+        let title = match self.turn_title.as_deref() {
+            // 本轮提问优先：这才是「当前任务」的名字。
+            Some(t) if !t.trim().is_empty() => t.to_string(),
+            // 没有提问正文（老格式会话）时才退到会话标题/项目名。
+            _ if self.title.is_empty() => fallback.to_string(),
+            _ => self.title.clone(),
         };
         let progress = self.progress();
         // 没有清单百分比时，进度条区域改上最近工具活动的文字描述，
@@ -856,6 +913,66 @@ mod tests {
     }
 
     #[test]
+    fn task_name_comes_from_this_turns_question() {
+        // 每轮用户消息前面都挂着一堆 system-reminder，真正的问题在 <user_query> 里。
+        let v = user(
+            "<system-reminder data-role=\"additional-data\">\n<current_time>\n…\n</current_time>\n</system-reminder>\n<user_query>正在工作下的任务名称为什么与当前任务名称不一致</user_query>",
+            1_700_000_000_000,
+        );
+        assert_eq!(
+            user_title(&v).as_deref(),
+            Some("正在工作下的任务名称为什么与当前任务名称不一致"),
+            "应取提问首行，且不受提醒块干扰"
+        );
+        // 老格式没有 <user_query>：去掉提醒块后取首个非标签行。
+        let v = user(
+            "<system-reminder data-role=\"user-context\">\n<craft_mode>\n普通模式\n</craft_mode>\n</system-reminder>\n把项目推上去\n第二行不要",
+            1_700_000_001_000,
+        );
+        assert_eq!(user_title(&v).as_deref(), Some("把项目推上去"));
+        // 只有提醒、没有正文：交给上层退回会话标题。
+        let v = user(
+            "<system-reminder>只有提醒</system-reminder>",
+            1_700_000_002_000,
+        );
+        assert_eq!(user_title(&v), None);
+    }
+
+    #[test]
+    fn the_screen_name_changes_when_a_new_task_starts() {
+        // 会话级 ai-title 只有一个，整段会话不能都叫这个名字。
+        let root = temp_root("turn-title");
+        let mut w = Watcher::new(root.clone());
+        append(
+            &root,
+            &[
+                json!({"type":"ai-title","aiTitle":"查看 Zectrix 本地推送 SDK 项目","timestamp":1}),
+                user(
+                    "<system-reminder>x</system-reminder>\n<user_query>先看看 SDK</user_query>",
+                    1_700_000_000_000,
+                ),
+            ],
+        );
+        let first = w.scan().unwrap();
+        assert_eq!(first.last().unwrap().0.title, "先看看 SDK");
+        append(
+            &root,
+            &[user(
+                "<system-reminder>x</system-reminder>\n<user_query>推送到 GitHub</user_query>",
+                1_700_000_060_000,
+            )],
+        );
+        let evs = w.scan().unwrap();
+        assert!(
+            evs.iter().any(|(e, _)| e.title == "推送到 GitHub"),
+            "新一轮的任务名必须换成这一轮的提问：{:?}",
+            evs.iter()
+                .map(|(e, _)| (e.task_id.clone(), e.title.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn completion_is_held_until_quiet() {
         let now = now_secs();
         let mut c = Cursor::default();
@@ -978,7 +1095,8 @@ mod tests {
         let first = w.scan().unwrap();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].0.status, Status::Working);
-        assert_eq!(first[0].0.title, "接入宠物状态");
+        // 上屏用这一轮的提问，而不是会话级 ai-title（后者整段会话只有一个）。
+        assert_eq!(first[0].0.title, "开始");
         // 轮次 ID 来自用户消息时间戳（秒）。
         assert_eq!(first[0].0.task_id, "sess-0001-u1700000000");
 

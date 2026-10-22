@@ -1473,7 +1473,8 @@ mod tests {
         let mut m = model_with(1, Status::Done, 200);
         assert!(!may_release(&m, 230, 60));
         // 宽限期内用户又发了一条：继续占着，不必断开再重连。
-        m.apply(event(2, Status::Working), "workbuddy", 230).unwrap();
+        m.apply(event(2, Status::Working), "workbuddy", 230)
+            .unwrap();
         assert!(!may_release(&m, 231, 60));
         assert!(!may_release(&m, 400, 60));
         // 再次结束后重新计时。
