@@ -206,7 +206,7 @@ fn cmd_autostart(args: &Args) -> Result<()> {
 }
 
 /// 本机持久化：只存状态缓存、设置与设备目标，不含任何会话正文。
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Store {
     #[serde(default)]
     model: Model,
@@ -252,8 +252,23 @@ fn save_store(store: &Store) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // 守护与交互命令共用一份 state.json。守护内存里的 store 是启动时的快照，
+    // 若整份回写，会把别处（init / autostart / run）刚保存的设备地址覆盖成 None。
+    // 写入前合并一次：设备地址与格式以「磁盘上的非空值」为准，除非本次显式改了。
+    let disk = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Store>(&b).ok());
+    let mut out = store.clone();
+    if let Some(disk) = disk {
+        if out.target.is_none() {
+            out.target = disk.target;
+        }
+        if out.format == default_format() && disk.format != default_format() {
+            out.format = disk.format;
+        }
+    }
     let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(store)?;
+    let bytes = serde_json::to_vec_pretty(&out)?;
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(&bytes)?;

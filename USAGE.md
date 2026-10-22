@@ -44,6 +44,7 @@ cargo build --locked --release
 ## 常用命令
 
 ```bat
+workbuddy-pet init                       首次引导：检查配置 → 连设备 → 预览 → 确认推送 → 自启
 workbuddy-pet sessions                        列出本机会话及推导状态与清单进度（诊断）
 workbuddy-pet preview [--demo waiting] [--session <会话ID>]
                                      渲染 400×300 预览 PNG，不连设备；
