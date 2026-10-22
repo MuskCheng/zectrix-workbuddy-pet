@@ -1,4 +1,4 @@
-//! 从 WorkBuddy 窗口读「准备中」那一行里的花絮短语。
+//! 从 WorkBuddy 窗口读当前那条花絮短语。
 //!
 //! 为什么必须走界面：这条文案是服务端随请求流式下发的，只在渲染进程内存里，
 //! 磁盘上没有任何副本。已核查的范围——`app.asar`、`AppData\Roaming\WorkBuddy`
@@ -7,9 +7,17 @@
 //! gzip + zlib + deflate 四种形态全扫过，一次都没命中。所以守护只读磁盘时
 //! 永远拿不到它，只能自己编（即内置短语池）。
 //!
-//! 取法：UI Automation 读主窗口的可访问性树。实测该窗口是 Electron，
-//! `Chrome_WidgetWin_1`，状态行是 `TextControl`：准备阶段为
-//! `准备中 你在思考大局，我在打磨细节`，工作中为 `已处理 16m39s`。
+//! 界面上它有两副面孔，**不能只认一种**：
+//!
+//! - 准备阶段（首个 token 之前）：状态行是 `准备中 你在思考大局，我在打磨细节`；
+//! - 出 token 之后：同一条文案搬到状态气泡里，和 `已消耗 1.42` 同一组、紧挨着
+//!   `不再显示` 按钮，每几秒换一条（`挑剔地筛选每一句`、`稍等，我去把答案捞回来`…）。
+//!
+//! 关键坑：历史轮次的 `准备中 <旧花絮>` 节点**会留在可访问性树里且永不更新**。
+//! 只按「最后一条准备中」取，会一直读到上一轮那句死文字，`set_live_quip` 判定
+//! 无变化，设备就永远不刷新（这正是「界面换了十几条、设备一次没动」的原因）。
+//! 因此以界面结构定位：**最后一个 `不再显示` 按钮前面那个文本节点**才是当前花絮；
+//! 没有按钮时退而取最后一个 `已消耗` 后面的第一条像花絮的文本。
 //!
 //! 采样时机：**只在真要推送时**调一次，不跟着界面持续轮询——墨水屏刷新贵，
 //! 而且用户要的就是「推的那一刻界面在说什么」。
@@ -21,9 +29,96 @@ use std::time::Duration;
 /// 采样超时。UIA 是跨进程 COM 调用，窗口卡顿时不能把守护拖住。
 const PROBE_TIMEOUT: Duration = Duration::from_millis(700);
 
-/// 读一次当前「准备中」状态行里的花絮；不在准备阶段或读不到时返回 None。
-pub fn preparing_quip() -> Option<String> {
-    imp::preparing_quip()
+/// 读一次界面上当前的花絮；读不到时返回 None（调用方回退内置短语池）。
+pub fn current_quip() -> Option<String> {
+    imp::current_quip()
+}
+
+/// 可访问性树里节点的类别。只需要区分「文本」「按钮」和「其它」。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Text,
+    Button,
+    Other,
+}
+
+/// 从（按出现顺序排好的）节点序列里挑出当前花絮。纯函数，便于单测。
+///
+/// 依据实测结构：状态气泡是 `… | 已消耗 1.42 <花絮> 不再显示`，
+/// 花絮是 `不再显示` 前最后一个文本节点；历史轮次里的 `准备中 <旧花絮>`
+/// 节点不参与判断（它会永远停在那里）。
+pub fn pick_quip(items: &[(Kind, String)]) -> Option<String> {
+    let mut last_text: Option<String> = None;
+    let mut by_button: Option<String> = None;
+    let mut last_consumed: Option<usize> = None;
+
+    for (index, (kind, name)) in items.iter().enumerate() {
+        let name = name.trim();
+        match kind {
+            Kind::Button if name == "不再显示" => {
+                // 气泡结尾：紧挨着它的那个文本就是本轮花絮。
+                if let Some(quip) = last_text.as_deref().and_then(implausible_reason_is_none) {
+                    by_button = Some(quip);
+                }
+                last_text = None;
+            }
+            Kind::Text => {
+                if name == "已消耗" {
+                    last_consumed = Some(index);
+                }
+                if !name.is_empty() {
+                    last_text = Some(name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if by_button.is_some() {
+        return by_button;
+    }
+    // 兜底：按钮被用户关掉时，取「已消耗」之后的第一个文本候选。
+    let start = last_consumed?;
+    items
+        .iter()
+        .skip(start + 1)
+        .take(4)
+        .filter(|(kind, _)| *kind == Kind::Text)
+        .find_map(|(_, name)| implausible_reason_is_none(name))
+}
+
+/// 名字读起来像不像一条花絮；像就返回它，不像返回 None。
+///
+/// 排掉的是实测中混进来的邻居：消耗数值、进度时长、`深度思考` 之类状态词，
+/// 以及气泡被替换成产品引导时的长句（`在「设置 > 个性化」中设置…。`）。
+fn implausible_reason_is_none(name: &str) -> Option<String> {
+    let text = name.trim();
+    let len = text.chars().count();
+    if !(4..=30).contains(&len) {
+        return None;
+    }
+    // 引导文案以句号收尾、爱用「」，花絮从不这样。
+    if text.ends_with('。') || text.contains('「') {
+        return None;
+    }
+    // 状态词和标签不是花絮；`准备中 …` 那种占位也是。
+    const LABELS: [&str; 8] = [
+        "已处理",
+        "已完成",
+        "准备中",
+        "深度思考",
+        "正在执行命令",
+        "已消耗",
+        "不再显示",
+        "预计消耗",
+    ];
+    if LABELS.iter().any(|label| text.starts_with(label)) {
+        return None;
+    }
+    // 纯数字/时长/省略号。
+    if !text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
+        return None;
+    }
+    Some(text.to_string())
 }
 
 #[cfg(windows)]
@@ -36,7 +131,7 @@ mod imp {
     };
     use windows::Win32::UI::Accessibility::{
         CUIAutomation, IUIAutomation, IUIAutomationElement, TreeScope_Descendants,
-        UIA_ControlTypePropertyId, UIA_TextControlTypeId,
+        UIA_ButtonControlTypeId, UIA_ControlTypePropertyId, UIA_TextControlTypeId,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextW, IsWindowVisible,
@@ -46,7 +141,7 @@ mod imp {
     /// 后续采样就只剩一次进程内消息投递的代价。
     static CLIENT: OnceLock<Sender<Sender<Option<String>>>> = OnceLock::new();
 
-    pub fn preparing_quip() -> Option<String> {
+    pub fn current_quip() -> Option<String> {
         let tx = CLIENT.get_or_init(spawn).clone();
         let (reply_tx, reply_rx) = mpsc::channel();
         tx.send(reply_tx).ok()?;
@@ -65,7 +160,7 @@ mod imp {
                 };
                 for reply in rx {
                     let value = match &automation {
-                        Some(a) => read_preparing(a),
+                        Some(a) => read_quip(a),
                         None => None,
                     };
                     // 调用方可能已经超时走人，发送失败属正常。
@@ -76,54 +171,46 @@ mod imp {
         tx
     }
 
-    /// 遍历当前会话的状态行，取**最后一条**「准备中…」。
-    /// 取最后一条而不是「最后一条带花絮的」：万一界面此刻只有「准备中」没有
-    /// 花絮，宁可回退到内置短语池，也不该把历史轮次的旧花絮顶上来。
-    fn read_preparing(automation: &IUIAutomation) -> Option<String> {
+    /// 只把「文本 + 按钮」两类节点按树序摊平，再交给 `pick_quip` 判定。
+    /// 用 UIA 的 Or 条件让过滤发生在 WorkBuddy 进程里——整棵 Electron 树有
+    /// 400+ 节点，全部拉回本地逐个读属性会慢一个数量级。
+    /// UIA 保证 `FindAll` 的结果是树序（深度优先），`pick_quip` 依赖这个顺序。
+    fn read_quip(automation: &IUIAutomation) -> Option<String> {
         let root = element_of_workbuddy(automation)?;
-        // 先在服务端按 ControlType 过滤，避免把整棵 Electron 树（400+ 节点）
-        // 拉回本地逐个读属性。
-        let condition = unsafe {
+        let text_condition = unsafe {
             automation.CreatePropertyCondition(
                 UIA_ControlTypePropertyId,
                 &VARIANT::from(UIA_TextControlTypeId.0),
             )
         }
         .ok()?;
+        let button_condition = unsafe {
+            automation.CreatePropertyCondition(
+                UIA_ControlTypePropertyId,
+                &VARIANT::from(UIA_ButtonControlTypeId.0),
+            )
+        }
+        .ok()?;
+        let condition = unsafe { automation.CreateOrCondition(&text_condition, &button_condition) }
+            .ok()?;
         let found = unsafe { root.FindAll(TreeScope_Descendants, &condition) }.ok()?;
         let count = unsafe { found.Length() }.ok()?;
-        let mut last_preparing: Option<String> = None;
-        for i in 0..count {
-            let Ok(element) = (unsafe { found.GetElement(i) }) else {
+        let mut items = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let Ok(element) = (unsafe { found.GetElement(index) }) else {
                 continue;
             };
-            let Ok(name) = (unsafe { element.CurrentName() }) else {
-                continue;
+            let kind = match unsafe { element.CurrentControlType() } {
+                Ok(t) if t == UIA_TextControlTypeId => Kind::Text,
+                Ok(t) if t == UIA_ButtonControlTypeId => Kind::Button,
+                _ => continue,
             };
-            let line = name.to_string();
-            if line.trim_start().starts_with("准备中") {
-                last_preparing = Some(line);
-            }
+            let name = unsafe { element.CurrentName() }
+                .map(|b| b.to_string())
+                .unwrap_or_default();
+            items.push((kind, name));
         }
-        let line = last_preparing?;
-        quip_of(&line)
-    }
-
-    /// 从 `准备中 你在思考大局，我在打磨细节` 里取出花絮部分。
-    pub(super) fn quip_of(line: &str) -> Option<String> {        let rest = line.trim().strip_prefix("准备中")?;
-        let quip = rest
-            .trim_start_matches([' ', '\u{200b}', '\u{200c}', '·', '|', '/', ':', '：', '-'])
-            .trim();
-        let len = quip.chars().count();
-        // 太短不像花絮（例如只有一个分隔符），太长说明抓到了别的段落。
-        if !(4..=40).contains(&len) {
-            return None;
-        }
-        // 花絮是中文拟人短句，至少得有一个汉字，别把「12s」之类当花絮。
-        if !quip.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
-            return None;
-        }
-        Some(quip.to_string())
+        pick_quip(&items)
     }
 
     /// 找 WorkBuddy 主窗口：多进程 Electron，按「可见 + 标题含 WorkBuddy +
@@ -172,39 +259,90 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    pub fn preparing_quip() -> Option<String> {
+    pub fn current_quip() -> Option<String> {
         None
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
-    use super::imp::quip_of;
+    use super::{pick_quip, Kind};
+
+    fn text(name: &str) -> (Kind, String) {
+        (Kind::Text, name.to_string())
+    }
+    fn button(name: &str) -> (Kind, String) {
+        (Kind::Button, name.to_string())
+    }
 
     #[test]
-    fn takes_only_the_quip_part_of_a_preparing_line() {
+    fn takes_the_text_right_before_the_dismiss_button() {
+        // 实测结构：… 已消耗 1.42 <花絮> 不再显示
+        let items = vec![
+            text("WorkBuddy"),
+            text("预计消耗"),
+            text("0.57 ~ 20.09"),
+            text("已处理 1m17s"),
+            text("正在执行命令"),
+            text("|"),
+            text("已消耗"),
+            text("1.42"),
+            text("挑剔地筛选每一句"),
+            button("不再显示"),
+        ];
+        assert_eq!(pick_quip(&items).as_deref(), Some("挑剔地筛选每一句"));
+    }
+
+    /// 回归：历史轮次留下的 `准备中 <旧花絮>` 节点永远不更新，
+    /// 曾经因为「取最后一条准备中」而让设备一次都刷不出来。
+    #[test]
+    fn ignores_stale_preparing_lines_from_earlier_turns() {
+        let items = vec![
+            text("准备中 你在思考大局，我在打磨细节"),
+            text("已完成 29m"),
+            text("准备中 …"),
+            text("已处理 27s"),
+            text("已消耗"),
+            text("0.9"),
+            text("稍等，我去把答案捞回来"),
+            button("不再显示"),
+        ];
+        assert_eq!(pick_quip(&items).as_deref(), Some("稍等，我去把答案捞回来"));
+    }
+
+    #[test]
+    fn falls_back_to_the_text_after_spending_when_the_button_is_gone() {
+        let items = vec![
+            text("已消耗"),
+            text("1.42"),
+            text("别慌，办法总比困难多，多到我得挑一个"),
+        ];
         assert_eq!(
-            quip_of("准备中 你在思考大局，我在打磨细节").as_deref(),
-            Some("你在思考大局，我在打磨细节")
-        );
-        assert_eq!(
-            quip_of("准备中\u{200b}正在给思路抛光打蜡").as_deref(),
-            Some("正在给思路抛光打蜡")
+            pick_quip(&items).as_deref(),
+            Some("别慌，办法总比困难多，多到我得挑一个")
         );
     }
 
     #[test]
-    fn rejects_lines_that_are_not_quips() {
-        assert_eq!(quip_of("已处理 16m39s"), None, "工作中没有花絮");
-        assert_eq!(quip_of("准备中"), None, "只有前缀不算花絮");
-        assert_eq!(quip_of("准备中 12s"), None, "时长不是花絮");
+    fn rejects_neighbours_that_are_not_quips() {
+        // 气泡被替换成产品引导长句时不能当花絮。
+        let items = vec![
+            text("已消耗"),
+            text("1.42"),
+            text("在「设置 > 个性化」中设置希望被怎样称呼，让对话从第一句就更自然。"),
+            button("不再显示"),
+        ];
+        assert_eq!(pick_quip(&items), None);
+        // 空文本、纯数值、状态词都不算。
+        assert_eq!(pick_quip(&[text("已消耗"), text("1.42"), button("不再显示")]), None);
+        assert_eq!(pick_quip(&[]), None);
     }
 
-    /// 真机联通性测试：窗口不在或不在准备阶段时返回 None 也算通过，
-    /// 只验证不 panic、不卡死。`cargo test -- --ignored` 手动跑。
+    /// 真机联通性：窗口不在或读不到时返回 None 也算通过，只验证不 panic、不卡死。
+    /// `cargo test -- --ignored` 手动跑。
     #[test]
     #[ignore = "需要 WorkBuddy 正在运行"]
     fn probes_live_window_without_panicking() {
-        let _ = super::preparing_quip();
+        let _ = super::current_quip();
     }
 }

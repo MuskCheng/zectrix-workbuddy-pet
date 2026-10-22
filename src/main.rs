@@ -17,6 +17,10 @@ use workbuddy_pet::{
 };
 use zectrix_sdk::{Device, ImageFormat};
 
+/// 花絮的独立刷新间隔：任务进行中最多每 30 秒采一次界面。
+/// 墨水屏刷新不便宜，而界面本来也是每几秒一换，30 秒已能看出「在动」。
+const QUIP_REFRESH: Duration = Duration::from_secs(30);
+
 fn now() -> i64 {
     chrono::Local::now().timestamp()
 }
@@ -450,12 +454,12 @@ fn scan_into(model: &mut Model, watcher: &mut Watcher) -> (Vec<TaskEvent>, bool)
         Err(e) => eprintln!("读取 WorkBuddy 会话失败: {e}"),
     }
     let mut changed = !applied.is_empty();
-    // 花絮：只在真要推送的时候，去 WorkBuddy 界面读一次「准备中」那条。
-    // 不跟着界面持续轮询——墨水屏刷新贵，而且界面文案本来就是每轮一换，
+    // 花絮：只在真要推送的时候，去 WorkBuddy 界面读一次当前那条。
+    // 不跟着界面持续轮询——墨水屏刷新贵，而且界面文案每几秒一换，
     // 推的那一刻读到的就是这一轮该显示的那条。
-    // 读不到（不在准备阶段、窗口最小化、UIA 被占）就保留内置短语池的轮换结果。
+    // 读不到（窗口最小化、气泡被关掉、UIA 被占）就保留内置短语池的轮换结果。
     if changed {
-        if let Some(quip) = uia::preparing_quip() {
+        if let Some(quip) = uia::current_quip() {
             if model.set_live_quip(&quip) {
                 println!("[花絮] {quip}");
             }
@@ -1101,6 +1105,8 @@ async fn cmd_run(args: &Args) -> Result<()> {
     let mut last_sig: Option<String> = None;
     let mut scan_tick = tokio::time::interval(Duration::from_secs(2));
     scan_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // 花絮单独计时：跟状态扫描解耦，避免每个心跳都去读一次界面。
+    let mut quip_tick = std::time::Instant::now();
 
     // 先扫一次再推：否则会把「还没读到会话」的空画面先刷上屏。
     scan_and_report(&mut model, &mut watcher, &mut store, &dev, false).await;
@@ -1139,6 +1145,28 @@ async fn cmd_run(args: &Args) -> Result<()> {
                     && push_if_changed(&dev, &model, &fonts, fmt, frame, &mut last_sig).await
                 {
                     frame = (frame + 1) % 6;
+                }
+                // 花絮有独立的一条低速通道：WorkBuddy 把会话记录批量延迟落盘
+                // （实测一轮里几分钟才落一批），只靠上面的状态变化推送，界面上
+                // 换了十几条、设备还是那句老的。这里最多每 30 秒采一次，真变了
+                // 才重推——跟的是「推的时候界面上是什么」，不是逐条镜像。
+                let active = model
+                    .current(now())
+                    .is_some_and(|t| matches!(t.status(), Status::Working | Status::Waiting));
+                if active && quip_tick.elapsed() >= QUIP_REFRESH {
+                    quip_tick = std::time::Instant::now();
+                    if let Some(quip) = uia::current_quip() {
+                        if model.set_live_quip(&quip) {
+                            println!("[花絮] {quip}");
+                            store.model = model.clone();
+                            if let Err(e) = save_store(&store) {
+                                eprintln!("配置保存失败: {e}");
+                            }
+                            if push_if_changed(&dev, &model, &fonts, fmt, frame, &mut last_sig).await {
+                                frame = (frame + 1) % 6;
+                            }
+                        }
+                    }
                 }
             }
             event = dev.next_event() => {
@@ -1366,6 +1394,7 @@ fn usage() {
   workbuddy-pet check   [--target IP|ID]                           只核对设备，不推画面
   workbuddy-pet sound   --status waiting|done [--target IP|ID] [--volume 0-100]
                                                           只播放一次提示音
+  workbuddy-pet quip                                       看一眼此刻从 WorkBuddy 界面读到的花絮（诊断用）
   workbuddy-pet push    [--demo <状态>] [--target IP|ID] [--format gray16|gray4|mono]
                                                           单次推送后立即断开
   workbuddy-pet run     [--target IP|ID] [--format F] [--volume 0-100] [--no-sound] [--no-animation]
@@ -1402,6 +1431,14 @@ async fn main() {
         "init" | "setup" | "guide" => cmd_init(&args).await,
         "check" => cmd_check(&args).await,
         "sound" | "tone" => cmd_sound(&args).await,
+        "quip" => {
+            // 诊断用：看一眼此刻从 WorkBuddy 界面读到的花絮是什么。
+            match uia::current_quip() {
+                Some(quip) => println!("界面当前花絮：{quip}"),
+                None => println!("没读到花絮（窗口不在、气泡被关掉，或此刻不在任务中）"),
+            }
+            Ok(())
+        }
         "push" | "once" => cmd_push(&args).await,
         "run" | "start" => cmd_run(&args).await,
         "watch" | "daemon" => cmd_watch(&args).await,

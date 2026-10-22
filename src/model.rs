@@ -171,7 +171,7 @@ pub fn quip_pool() -> &'static [&'static str] {
 
 /// 花絮在 400×300 画面上只占右下角一条（11 号字、约 214px 宽），
 /// 超过 18 个汉字就会顶到左边的上下文占用标签上。
-const QUIP_MAX_CHARS: usize = 18;
+const QUIP_MAX_CHARS: usize = 20;
 
 /// 压到一行的宽度内；超长时截断加省略号，而不是任由它撞到左边的标签。
 fn fit_quip(text: &str) -> String {
@@ -569,10 +569,10 @@ mod tests {
         assert_eq!(m.quip, "你在思考大局，我在打磨细节");
         // 同一条重复采到不算变化，否则同一帧会被反复推。
         assert!(!m.set_live_quip("你在思考大局，我在打磨细节"));
-        // 界面花絮比内置池长，超宽要截断到 18 字（末位省略号），
+        // 界面花絮比内置池长，超宽要截断到 20 字（末位省略号），
         // 不能顶到左边的上下文占用标签上。
         assert!(m.set_live_quip("这是一条特别特别特别特别特别特别长的界面花絮短语"));
-        assert_eq!(m.quip.chars().count(), 18);
+        assert_eq!(m.quip.chars().count(), 20);
         assert!(m.quip.ends_with('…'));
         // 只有分隔符/空白时不采信，保留原来的句子。
         let kept = m.quip.clone();
