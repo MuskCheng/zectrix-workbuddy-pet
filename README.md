@@ -26,16 +26,43 @@
 | --- | --- |
 | 设备 | ZECTRIX Note 4（`zectrix-s3-epaper-4.2`），画布 400×300 |
 | 固件 | 3.7.2（`zectrix-sdk` 0.1.0 配套）。**不支持 Note 4C**，其他固件不承诺 |
-| 系统 | Windows 10/11 x64（实测 Windows 11 专业版 / i5-12500H / rustc 1.99.1 / CMake 4.4.4） |
+| 系统 | Windows 10/11 **x64**（实测 Windows 11 专业版 / i5-12500H / rustc 1.99.1 / CMake 4.4.4） |
+| 架构边界 | 只发 x64 二进制：32 位 Windows 不支持；ARM64 设备可走 Win11 的 x64 模拟但**未实测**；Windows 7/8 未验证 |
 | 网络 | 设备与电脑在同一局域网；设备上开启「设置 → 网络同步 → 待机保持 Wi-Fi」 |
 | API Key | 本地直连**不需要**极趣云 API Key；本程序不读取任何账号或密钥 |
 
 ## 安装
 
-只支持 Windows 10/11 x64。安装分两条路：把下面「交给 AI」这一段原样发给 AI 代理，或自己按
-「手动安装」做一遍——两者等价，脚本就是手动步骤的封装。
+只支持 Windows 10/11 x64。三条路，按省事程度排：
 
-### 交给 AI（推荐）
+### 下载即用（最快，无需编译）
+
+到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
+`workbuddy-pet-0.1.0-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
+（约 5.4 MB），不依赖 .NET、不依赖 VC++ 运行库、不需要 Rust 工具链，也不用管 SDK 目录：
+
+```powershell
+.\workbuddy-pet-0.1.0-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
+Start-Sleep 9                                                # 固件释放单连接约需 8 秒
+.\workbuddy-pet-0.1.0-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
+.\workbuddy-pet-0.1.0-windows-x64.exe autostart on --target <IP>
+```
+
+下载页同时给出 `SHA256SUMS.txt`，可核对文件完整性：
+
+```powershell
+(Get-FileHash .\workbuddy-pet-0.1.0-windows-x64.exe -Algorithm SHA256).Hash
+```
+
+二进制仍然**只是宠物程序**：它读本机 WorkBuddy 的会话数据，并直接连局域网里的 Note 4；
+不会安装驱动、不写系统目录、不需要管理员权限（开机自启写在当前用户的启动文件夹）。
+
+升级就是下载新 exe 覆盖旧文件，再重启一次守护；`autostart` 指向的是路径，不用重设，
+设置与任务记录都在 `%LOCALAPPDATA%\zectrix-workbuddy-pet` 里，覆盖 exe 不会丢。
+
+### 交给 AI 编译（要改代码时）
+
+把下面这一段原样发给 AI 代理，或自己按「手动安装」做一遍——两者等价，脚本就是手动步骤的封装。
 
 复制这段话给 AI 代理，把 `<设备IP>` 换成设备「设置 → 网络同步」里显示的地址（暂时没有设备就删掉这半句）：
 
