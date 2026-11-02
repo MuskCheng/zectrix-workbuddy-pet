@@ -291,6 +291,29 @@ impl Model {
         Ok(true)
     }
 
+    /// 把一条会话从跟随里整条移除（如被识别为定时任务类型）：
+    /// 该会话的所有轮次一并退场，正在上屏的也会立刻让位。
+    /// 返回是否真的删掉了东西，调用方据此决定要不要刷新画面。
+    pub fn forget_session(&mut self, source: &str, thread_id: &str) -> bool {
+        let before = self.tasks.len();
+        self.tasks.retain(|t| {
+            !(t.source == source && t.event.thread_id.as_deref() == Some(thread_id))
+        });
+        if self.tasks.len() != before {
+            // 选中项可能指向被移除的任务，留着会让翻页行为悬空。
+            let selected_gone = self
+                .selected
+                .as_ref()
+                .is_some_and(|key| self.tasks.iter().all(|t| &t.key() != key));
+            if selected_gone {
+                self.selected = None;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     /// 按 task_id 查当前状态（花絮轮换判定用）。
     fn status_of(&self, task_id: &str, source: &str) -> Status {
         self.tasks
@@ -560,6 +583,31 @@ mod tests {
         let saved = serde_json::to_string(&m).unwrap();
         let restored: Model = serde_json::from_str(&saved).unwrap();
         assert_eq!(restored.current(12).unwrap().status(), Status::Waiting);
+    }
+
+    #[test]
+    fn forget_session_removes_every_turn_and_releases_the_device() {
+        let mut m = Model::default();
+        let mut e = ev(1, Status::Working);
+        e.thread_id = Some("chat-a".into());
+        m.apply(e.clone(), "workbuddy", 10).unwrap();
+        e.task_id = "turn-2".into();
+        e.seq = 2;
+        m.apply(e, "workbuddy", 11).unwrap();
+        let mut other = ev(3, Status::Working);
+        other.thread_id = Some("chat-b".into());
+        m.apply(other, "workbuddy", 12).unwrap();
+        m.selected = Some("workbuddy:turn-2".into());
+
+        assert!(m.forget_session("workbuddy", "chat-a"));
+        assert!(
+            m.tasks.iter().all(|t| t.event.thread_id.as_deref() != Some("chat-a")),
+            "该会话的所有轮次都要退场"
+        );
+        assert_eq!(m.selected, None, "指向被移除任务的选中项必须清掉");
+        assert_eq!(m.current(13).unwrap().event.thread_id.as_deref(), Some("chat-b"));
+        assert!(!m.forget_session("workbuddy", "chat-a"), "重复清理不应再报变化");
+        assert!(!m.forget_session("workbuddy", "chat-x"), "不存在的会话不算变化");
     }
 
     #[test]

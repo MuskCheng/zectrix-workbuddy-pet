@@ -13,7 +13,7 @@ use workbuddy_pet::{
     model::{Event as TaskEvent, Model, Status, Task},
     raster::{self, Fonts},
     sound, uia,
-    workbuddy::Watcher,
+    workbuddy::{open_readonly_db, Watcher},
 };
 use zectrix_sdk::{Device, ImageFormat};
 
@@ -717,8 +717,7 @@ fn parse_status(value: &str) -> Result<Option<Status>> {
 /// 读各会话的上下文占用。来源：`~/.workbuddy/workbuddy.db` 的 session_usage 表，
 /// `used` 是已用 token、`size` 是窗口大小（如 300000）。
 ///
-/// 直接只读打开会在 WAL 模式下尝试写 db-shm/db-wal（沙箱与只读目录都会失败），
-/// 所以先把 db + wal 复制到临时目录再打开副本——库只有几百 KB，代价可忽略。
+/// 读库走 `open_readonly_db()`（先直连只读，失败退回复制副本）。
 /// 结果缓存 15 秒：上下文随每轮对话增长，刷新太快只会让墨水屏频繁刷新。
 fn read_contexts() -> std::collections::HashMap<String, (u32, u32)> {
     use std::sync::Mutex;
@@ -734,38 +733,23 @@ fn read_contexts() -> std::collections::HashMap<String, (u32, u32)> {
         return guard.1.clone();
     }
     let mut map = Map::new();
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        let src = std::path::PathBuf::from(home)
-            .join(".workbuddy")
-            .join("workbuddy.db");
-        if src.is_file() {
-            let tmp = std::env::temp_dir().join("workbuddy-pet-ctx.db");
-            let _ = std::fs::remove_file(&tmp);
-            let _ = std::fs::remove_file(tmp.with_extension("db-wal"));
-            if std::fs::copy(&src, &tmp).is_ok() {
-                let _ = std::fs::copy(src.with_extension("db-wal"), tmp.with_extension("db-wal"));
-                if let Ok(conn) = rusqlite::Connection::open(&tmp) {
-                    let _ = conn.busy_timeout(Duration::from_millis(300));
-                    if let Ok(mut stmt) =
-                        conn.prepare("select session_id, used, size from session_usage")
-                    {
-                        if let Ok(rows) = stmt.query_map([], |r| {
-                            Ok((
-                                r.get::<_, String>(0)?,
-                                r.get::<_, i64>(1)?,
-                                r.get::<_, i64>(2)?,
-                            ))
-                        }) {
-                            for (id, used, size) in rows.flatten() {
-                                if used > 0 && size > 0 {
-                                    map.insert(id, (used as u32, size as u32));
-                                }
-                            }
-                        }
+    if let Some(conn) = open_readonly_db() {
+        let _ = conn.busy_timeout(Duration::from_millis(300));
+        if let Ok(mut stmt) =
+            conn.prepare("select session_id, used, size from session_usage")
+        {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            }) {
+                for (id, used, size) in rows.flatten() {
+                    if used > 0 && size > 0 {
+                        map.insert(id, (used as u32, size as u32));
                     }
                 }
-                let _ = std::fs::remove_file(&tmp);
-                let _ = std::fs::remove_file(tmp.with_extension("db-wal"));
             }
         }
     }
@@ -787,6 +771,15 @@ fn scan_into(model: &mut Model, watcher: &mut Watcher) -> (Vec<TaskEvent>, bool)
         Err(e) => eprintln!("读取 WorkBuddy 会话失败: {e}"),
     }
     let mut changed = !applied.is_empty();
+    // 定时任务（后台自动化）会话不上屏、不参与占用判定：已跟踪的旧轮次
+    // 要从模型里清出去，否则设备会一直停在它的画面上交还不了。
+    // 每次扫描都全量对一遍——state.json 里持久化的旧任务也能在重启后被清掉。
+    for stem in watcher.automations() {
+        if model.forget_session("workbuddy", stem) {
+            changed = true;
+            println!("[跟随] 定时任务会话不上屏：{stem}");
+        }
+    }
     // 左下角的上下文占用跟着「当前展示的会话」走：切任务、对话变长都能反映出来。
     // 只在整数百分比变化时触发推送——每 1% 刷一次墨水屏已足够，再多就是闪。
     let now = now();

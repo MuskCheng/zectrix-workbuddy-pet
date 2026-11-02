@@ -45,20 +45,20 @@
 #### 下载即用（最快，无需编译）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.1.3-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
+`workbuddy-pet-0.1.4-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
 （约 5.4 MB），不依赖 .NET、不依赖 VC++ 运行库、不需要 Rust 工具链，也不用管 SDK 目录：
 
 ```powershell
-.\workbuddy-pet-0.1.3-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
+.\workbuddy-pet-0.1.4-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
 Start-Sleep 9                                                # 固件释放单连接约需 8 秒
-.\workbuddy-pet-0.1.3-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
-.\workbuddy-pet-0.1.3-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
+.\workbuddy-pet-0.1.4-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
+.\workbuddy-pet-0.1.4-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
 ```
 
 下载页同时给出 `SHA256SUMS.txt`，可核对文件完整性：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.1.3-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.1.4-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 二进制仍然**只是宠物程序**：它读本机 WorkBuddy 的会话数据，并直接连局域网里的 Note 4；
@@ -92,7 +92,7 @@ Start-Sleep 9                                                # 固件释放单�
 
    第二条会检查设备、推一张画面、写开机自启；**不传 `-DeviceIp` 就完全不碰设备**。
 4. **成功的判定**（三条同时成立）：末尾打印 `DONE`；`target\release\workbuddy-pet.exe` 存在（约 5 MB）；
-   测试汇总为 `45 passed` + `7 passed`、`0 failed`（另有 1 项 `ignored` 需要 WorkBuddy 正在运行）。
+   测试汇总全部 `ok`、`0 failed`（另有 1 项 `ignored` 需要设备在线；通过数随版本增长，不必精确对上）。
 5. **失败按退出码定位**：`1` 工具链缺失（脚本会列出 winget 命令，装完重开终端再跑）｜`2` SDK 克隆失败
    （网络 / 代理）｜`3` 构建失败（多为 MSVC 缺 C++ 组件，或 `CMAKE_POLICY_VERSION_MINIMUM` 未生效——脚本
    已设置）｜`4` 测试失败｜`5` 产物缺失｜`6` 连不上设备。
@@ -169,7 +169,7 @@ Start-Sleep 9                                                # 固件释放单�
 
 ```powershell
 # 下载即用
-.\workbuddy-pet-0.1.3-windows-x64.exe autostart on --target <IP>
+.\workbuddy-pet-0.1.4-windows-x64.exe autostart on --target <IP>
 # 编译安装
 .\target\release\workbuddy-pet.exe autostart on --target <IP>
 ```
@@ -290,8 +290,13 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
   助手消息状态、`todo_write` 清单条目数与完成数。
 - `~/.workbuddy/logs/main.log`：`[TaskNotify] pending: session=<id> kind=question|permission`。
   **权限确认卡不写会话 JSONL**，这是唯一能覆盖所有确认形态（含写入卡、命令确认、其他会话）的信号源。
-- `~/.workbuddy/workbuddy.db`：`sessions` 表取侧边栏显示的会话名（`custom_title` 优先），
-  `session_usage` 表取上下文占用。
+- `~/.workbuddy/workbuddy.db`：`sessions` 表取侧边栏显示的会话名（`custom_title` 优先）与
+  `is_background_automation` 标记，`session_usage` 表取上下文占用。
+
+**定时任务不显示**。调度器发起的后台自动化会话（`is_background_automation = 1`，如每日定时
+领积分、定时摘要）整条不跟随：不上屏、不进任务列表、不参与设备占用判定，已上屏的会在
+下一拍退场。它们按计划反复运行，若当作普通任务跟随，设备会被长期占着交还不了。
+代价也要说清：这类会话弹出的确认卡同样不会提醒——定时任务请写成无人值守可以自己跑完的样子。
 
 任务名与侧边栏一致：侧边栏改名**只写数据库、不写会话文件**，所以程序读库，改名后 15 秒内跟上；
 读不到库时才退到 JSONL 里的 `ai-title`，再退到本轮提问首行。名称会显示在设备上，
@@ -324,7 +329,7 @@ cargo build --locked --release
 
 一键装好并跑完这些的是 `scripts\install.ps1`（`-SkipTests` 可跳过测试）。
 
-51 项测试（状态机、标题解析、去抖、占用判定、版式、提示音、花絮定位；另 1 项真机探针需
+54 项测试（状态机、标题解析、去抖、占用判定、定时任务过滤、版式、提示音、花絮定位；另 1 项真机探针需
 WorkBuddy 正在运行，默认忽略）。模块分工：
 `model`（状态机与任务表）、`workbuddy`（本机数据源与信号源）、`layout` + `raster`（场景与灰度 PNG）、
 `sound`（PCM16 合成）、`device`（SDK 封装）、`main`（命令、占用策略、推送循环）。
@@ -338,6 +343,8 @@ WorkBuddy 正在运行，默认忽略）。模块分工：
 - **不能替你在电脑上点选项**：选项卡片只接受鼠标；模拟键盘能送达窗口但卡片无响应。
   等待画面只提示「请回电脑确认」。
 - **积分 / 计费类信息不显示**，只读上述三处本机数据。
+- **定时任务不上屏**：后台自动化会话（`is_background_automation`）整条忽略，含它的确认卡——
+  定时任务要写成无人值守能自己跑完的样子。
 - **单连接**：切换程序前先退出旧的，否则会拿到 `Busy`；强杀后固件约 15 秒才释放租约。
 - **`ResultUnknown` 不重试**：SDK 无法确认结果时不重新刷图、不重播，避免重复动作。
 - **提示音是设备提示音**：16 kHz 单声道 PCM16；SDK 不含语音识别、TTS 或大模型。

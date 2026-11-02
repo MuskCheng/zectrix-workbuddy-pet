@@ -16,7 +16,7 @@
 use crate::model::{clean, Event, ProgressSource, Status};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -251,41 +251,93 @@ fn db_titles() -> std::collections::HashMap<String, String> {
         return guard.1.clone();
     }
     let mut map = Map::new();
-    if let Ok(home) = std::env::var("USERPROFILE") {
-        let src = std::path::PathBuf::from(home)
-            .join(".workbuddy")
-            .join("workbuddy.db");
-        if src.is_file() {
-            let tmp = std::env::temp_dir().join("workbuddy-pet-titles.db");
-            let _ = std::fs::remove_file(&tmp);
-            let _ = std::fs::remove_file(tmp.with_extension("db-wal"));
-            if std::fs::copy(&src, &tmp).is_ok() {
-                let _ = std::fs::copy(src.with_extension("db-wal"), tmp.with_extension("db-wal"));
-                if let Ok(conn) = rusqlite::Connection::open(&tmp) {
-                    let _ = conn.busy_timeout(Duration::from_millis(300));
-                    if let Ok(mut stmt) = conn.prepare(
-                        "select id, coalesce(nullif(custom_title, ''), title, '') \
-                         from sessions where deleted_at is null",
-                    ) {
-                        if let Ok(rows) = stmt
-                            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-                        {
-                            for (id, title) in rows.flatten() {
-                                let t = clean(title.trim(), 60);
-                                if !t.is_empty() {
-                                    map.insert(id, t);
-                                }
-                            }
-                        }
+    if let Some(conn) = open_readonly_db() {
+        let _ = conn.busy_timeout(Duration::from_millis(300));
+        if let Ok(mut stmt) = conn.prepare(
+            "select id, coalesce(nullif(custom_title, ''), title, '') \
+             from sessions where deleted_at is null",
+        ) {
+            if let Ok(rows) = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            {
+                for (id, title) in rows.flatten() {
+                    let t = clean(title.trim(), 60);
+                    if !t.is_empty() {
+                        map.insert(id, t);
                     }
                 }
-                let _ = std::fs::remove_file(&tmp);
-                let _ = std::fs::remove_file(tmp.with_extension("db-wal"));
             }
         }
     }
     *guard = (Instant::now(), map.clone());
     map
+}
+
+/// 打开 `~/.workbuddy/workbuddy.db` 的只读连接，供所有读库的场景共用。
+///
+/// 两段式，各自覆盖一类失败：
+/// 1. **直连只读**：WorkBuddy 在跑时 `-shm` 已存在，WAL 库的只读连接开箱即用，
+///    读到的永远是最新状态。
+/// 2. **复制副本**：直连失败（目录只读、shm 无法创建）时，把 db+wal 复制到
+///    临时目录再开。注意复制与写入并发时 wal 可能被检出坏帧——SQLite 会丢弃
+///    坏帧之后的内容，极端情况下读到旧快照甚至空库，所以它只作兜底。
+///
+/// 临时副本只在下次调用前清理（开头的 remove_file），不追着连接关。
+pub fn open_readonly_db() -> Option<rusqlite::Connection> {
+    let src = std::path::PathBuf::from(std::env::var("USERPROFILE").ok()?)
+        .join(".workbuddy")
+        .join("workbuddy.db");
+    if !src.is_file() {
+        return None;
+    }
+    if let Ok(conn) =
+        rusqlite::Connection::open_with_flags(&src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    {
+        return Some(conn);
+    }
+    let tmp = std::env::temp_dir().join("workbuddy-pet-ro.db");
+    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(tmp.with_extension("db-wal"));
+    std::fs::copy(&src, &tmp).ok()?;
+    let _ = std::fs::copy(src.with_extension("db-wal"), tmp.with_extension("db-wal"));
+    rusqlite::Connection::open(&tmp).ok()
+}
+
+/// 后台自动化（定时任务）会话集合。来源：`workbuddy.db` 的
+/// `sessions.is_background_automation`——调度器按计划反复发起的会话都带这个标记。
+///
+/// 这些会话对设备是毒药：每次定时触发都会把状态翻回「正在工作」，占用判定
+/// 看到它就永远交还不了设备。用户明确要求整条不上屏，所以这里整集合拉出来，
+/// 跟随层直接把它们当不存在。读法与缓存策略与 `db_titles` 完全一致。
+fn db_automations() -> HashSet<String> {
+    use std::time::{Duration, Instant};
+    type Set = HashSet<String>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<(Instant, Set)>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        std::sync::Mutex::new((Instant::now() - Duration::from_secs(3600), Set::new()))
+    });
+    let Ok(mut guard) = cache.lock() else {
+        return Set::new();
+    };
+    if guard.0.elapsed() < Duration::from_secs(15) {
+        return guard.1.clone();
+    }
+    let mut set = Set::new();
+    if let Some(conn) = open_readonly_db() {
+        let _ = conn.busy_timeout(Duration::from_millis(300));
+        if let Ok(mut stmt) = conn
+            .prepare("select id from sessions where is_background_automation = 1")
+        {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+                for id in rows.flatten() {
+                    set.insert(id);
+                }
+            }
+        }
+    }
+    *guard = (Instant::now(), set.clone());
+    set
 }
 
 fn now_secs() -> i64 {
@@ -673,6 +725,9 @@ pub struct Watcher {
     cursors: HashMap<PathBuf, Cursor>,
     /// 主进程任务通知日志的待确认集合（question/permission）。
     notify: TaskNotify,
+    /// 后台自动化（定时任务）会话：整条不跟随、不上屏、不参与占用判定。
+    /// 每次扫描从 workbuddy.db 刷新并累积（测试可手工注入）。
+    automations: HashSet<String>,
     /// 只看指定会话（stem）：调试与预览单会话状态用，正式运行不设。
     only: Option<String>,
 }
@@ -683,8 +738,22 @@ impl Watcher {
             root,
             cursors: HashMap::new(),
             notify: TaskNotify::default(),
+            automations: HashSet::new(),
             only: None,
         }
+    }
+
+    /// 测试注入：把某个会话标记成定时任务类型。
+    pub fn ignore_session(&mut self, stem: &str) {
+        let stem = stem.trim();
+        if !stem.is_empty() {
+            self.automations.insert(stem.to_string());
+        }
+    }
+
+    /// 当前认定的定时任务会话集合，供上层把模型里已跟踪的旧轮次清出去。
+    pub fn automations(&self) -> &HashSet<String> {
+        &self.automations
     }
 
     pub fn only(mut self, stem: &str) -> Self {
@@ -714,14 +783,20 @@ impl Watcher {
             };
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("jsonl") && path.is_file() {
-                    if let Some(only) = &self.only {
-                        if path.file_stem().and_then(|s| s.to_str()) != Some(only.as_str()) {
-                            continue;
-                        }
-                    }
-                    out.push((path.clone(), mtime(&path)));
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") || !path.is_file() {
+                    continue;
                 }
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                // 定时任务会话整条不跟随：从源头就不建立游标。
+                if self.automations.contains(stem) {
+                    continue;
+                }
+                if let Some(only) = &self.only {
+                    if stem != only.as_str() {
+                        continue;
+                    }
+                }
+                out.push((path.clone(), mtime(&path)));
             }
         }
         out.sort_by_key(|a| std::cmp::Reverse(a.1));
@@ -732,6 +807,22 @@ impl Watcher {
     /// 返回本轮新出现的状态事件；`at` 是记录时间（必要时回退到文件修改时间）。
     pub fn scan(&mut self) -> Result<Vec<(Event, i64)>> {
         let now = now_secs();
+        // 定时任务会话集合：db 里登记过的整条忽略；已经跟上的游标也要退场，
+        // 否则它此前上过屏的状态会永远停在设备上。
+        self.automations.extend(db_automations());
+        let retired: Vec<PathBuf> = self
+            .cursors
+            .keys()
+            .filter(|p| {
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| self.automations.contains(s))
+            })
+            .cloned()
+            .collect();
+        for p in retired {
+            self.cursors.remove(&p);
+        }
         // 先吃掉主进程通知日志：权限确认卡不写会话 JSONL，待确认集合
         // 必须在处理会话文件之前刷新，且无新行的会话也要能升为等待。
         self.notify.poll();
@@ -1556,6 +1647,50 @@ mod tests {
         let evs = w.scan().unwrap();
         assert_eq!(evs.len(), 1, "补全换行后应产生事件");
         assert_eq!(evs[0].0.status, Status::Working);
+    }
+
+    #[test]
+    fn background_automation_sessions_are_never_followed() {
+        // 定时任务（后台自动化）会话整条不上屏：从未跟踪过的直接被过滤；
+        // 已经跟上的（此前上过屏）也要在下一拍退场，从模型里清掉。
+        let root = temp_root("automation");
+        let mut w = Watcher::new(root.clone());
+        w.ignore_session("sess-0001");
+        append(&root, &[user("定时领积分", 1_700_000_000_000)]);
+        assert!(
+            w.scan().unwrap().is_empty(),
+            "定时任务类型的会话不得产生任何事件"
+        );
+
+        // 先当普通任务跟上（守护已在推送它的画面），随后被标记为自动化。
+        let mut w2 = Watcher::new(root.clone());
+        let evs = w2.scan().unwrap();
+        assert_eq!(evs.last().unwrap().0.status, Status::Working);
+        w2.ignore_session("sess-0001");
+        let evs2 = w2.scan().unwrap();
+        assert!(
+            evs2.is_empty(),
+            "标记为定时任务后不得再有新事件：{:?}",
+            evs2.iter().map(|(e, _)| &e.task_id).collect::<Vec<_>>()
+        );
+        assert!(
+            w2.automations().contains("sess-0001"),
+            "上层要能拿到定时任务集合用于清理模型"
+        );
+
+        let mut m = Model::default();
+        for (e, at) in evs {
+            m.apply(e, "workbuddy", at).unwrap();
+        }
+        assert!(m.current(1_700_000_020).is_some());
+        assert!(
+            m.forget_session("workbuddy", "sess-0001"),
+            "清理必须真的删掉任务"
+        );
+        assert!(
+            m.current(1_700_000_020).is_none(),
+            "清掉后设备回到空闲，占用判定才放得下"
+        );
     }
 
     #[test]
