@@ -271,6 +271,33 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 - 守护用 `daemon.lock`（PID）保证单实例，重复拉起时后来者静默退出。
 - 这套自启由 `autostart on` 一次性装好，写入细节与装完怎么核对见「安装 → 二、开启跟随」。
 
+**看门狗的死角**：它和守护是父子关系，两者被一起带走时没有第三方能补位。实测在笔记本上
+很常见——合盖进入 Modern Standby 后整组进程被冻结回收，唤醒也不回来；注销会话、从任务管理器
+结束进程树同理。登录项只在登录那一刻执行，机器连着开几天不重启，这段空窗就一直空着。
+
+补位的是 WorkBuddy 自己的 hook：在 `~/.workbuddy/settings.json` 的 `hooks.UserPromptSubmit`
+里挂一条命令，每次提交任务时执行一次 `workbuddy-pet ensure`（幂等：守护在就直接返回，
+不在就拉起）。把下面这段的 `<用户名>` 换成自己的，路径指向
+`%LOCALAPPDATA%\zectrix-workbuddy-pet\hook-ensure.cmd`：
+
+```json
+"hooks": {
+  "UserPromptSubmit": [
+    { "hooks": [ { "type": "command",
+        "command": "\"C:/Users/<用户名>/AppData/Local/zectrix-workbuddy-pet/hook-ensure.cmd\"",
+        "timeout": 10 } ] }
+  ]
+}
+```
+
+用 `.cmd` 包一层，是因为宿主的 hook 执行器在 Windows 上可能走 bash 也可能走 cmd，
+把重定向写成 `>/dev/null` 只在 bash 下成立。脚本里每次执行会往同目录 `hook.log` 追加
+一行时间戳——想确认 hook 到底有没有被调用，看这个文件即可，不用猜。
+
+这条路保的是「你还在用 WorkBuddy」的场景：只要你提交任务，它就会被补上。真正长时间
+无人值守（关机重启后一直没人登录）仍只能靠登录项。计划任务本来更适合做这件事，但在
+受限账户上注册会直接返回「拒绝访问」，实测不可用，所以不作为方案。
+
 装好之后要调命令，先切到副本目录再跑（PowerShell 与 cmd 都适用）：
 
 ```powershell
@@ -367,6 +394,7 @@ WorkBuddy 正在运行，默认忽略）。模块分工：
 | 中文显示为方块 | 确认 `C:\Windows\Fonts\msyh.ttc`、`msyhbd.ttc` 存在 |
 | 设备停在旧画面 | 系统通知会临时覆盖约 12 秒；`push` 打印「已推送」即设备报告显示完成 |
 | 有任务但设备没反应 | `workbuddy-pet autostart status`：守护「未运行」就 `autostart on`；看门狗也不在就是登录项没生效（重新登录，或再跑一次 `on`） |
+| 守护和看门狗都「未运行」，日志停在某个时刻 | 多为合盖待机 / 注销后整组进程被回收，登录项不会再次触发。跑一次 `autostart on`；想长期免疫就按「守护为什么不会自己消失 → 看门狗的死角」配上 hook |
 | 结束守护后它又自己回来 | 这是看门狗在补，属正常行为；要真正停用 `workbuddy-pet autostart off` |
 
 ## 许可
