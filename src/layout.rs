@@ -1,26 +1,7 @@
 use crate::model::{Model, ProgressSource, Status, TASKS_PER_PAGE};
+use crate::sprite;
 use serde_json::{json, Value};
 
-// Original pixel companion from the earlier AI 工作搭子 prototype, expressed as
-// horizontal runs rather than a full-screen bitmap to stay within Hub v1's 200 elements.
-const PET: [&str; 16] = [
-    "..###......###..",
-    "..#..#....#..#..",
-    "..#...####...#..",
-    ".#............#.",
-    "#..............#",
-    "#..............#",
-    "#..............#",
-    "#..............#",
-    ".#............#.",
-    "..#..........#..",
-    "...##########...",
-    "....#......#....",
-    "....#......#....",
-    "...#........#...",
-    "..############..",
-    "..##........##..",
-];
 fn rect(e: &mut Vec<Value>, x: i32, y: i32, w: i32, h: i32, fill: Option<u8>) {
     let mut v = json!({"type":"rect","x":x,"y":y,"w":w,"h":h});
     if let Some(f) = fill {
@@ -40,82 +21,8 @@ fn rect_r(e: &mut Vec<Value>, x: i32, y: i32, w: i32, h: i32, r: i32, fill: Opti
 fn text_white(e: &mut Vec<Value>, s: &str, x: i32, y: i32, size: i32, width: i32) {
     e.push(json!({"type":"text","content":s,"x":x,"y":y,"size":size,"width_limit":width,"weight":"bold","color":255}));
 }
-// Restore the original raised arms, smiling face and three sparkles. Rasterize
-// only these small strokes into merged rectangles supported by Hub v1.
-fn cheer(e: &mut Vec<Value>, x: i32, y: i32, p: i32) {
-    let mut pixels = std::collections::BTreeSet::new();
-    let mut stroke = |points: &[(i32, i32)], width: i32| {
-        for segment in points.windows(2) {
-            let ((x0, y0), (x1, y1)) = (segment[0], segment[1]);
-            let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
-            for i in 0..=steps {
-                let px = x0 + ((x1 - x0) as f64 * i as f64 / steps as f64).round() as i32;
-                let py = y0 + ((y1 - y0) as f64 * i as f64 / steps as f64).round() as i32;
-                for dy in 0..width {
-                    for dx in 0..width {
-                        pixels.insert((py + dy - width / 2, px + dx - width / 2));
-                    }
-                }
-            }
-        }
-    };
-    for ex in [x + 4 * p, x + 10 * p] {
-        stroke(
-            &[
-                (ex, y + 6 * p),
-                (ex + p, y + 5 * p),
-                (ex + 2 * p, y + 6 * p),
-            ],
-            2,
-        );
-    }
-    stroke(
-        &[
-            (x + 6 * p, y + 8 * p),
-            (x + 7 * p, y + 9 * p),
-            (x + 9 * p, y + 9 * p),
-            (x + 10 * p, y + 8 * p),
-        ],
-        2,
-    );
-    stroke(&[(x + 3 * p, y + 12 * p), (x - p, y + 9 * p)], 3);
-    stroke(&[(x + 13 * p, y + 12 * p), (x + 17 * p, y + 9 * p)], 3);
-    for (xx, yy) in [(x - 7, y - 10), (x + 100, y - 11), (x + 115, y + 30)] {
-        stroke(&[(xx, yy), (xx + 7, yy + 7)], 2);
-        stroke(&[(xx + 7, yy), (xx, yy + 7)], 2);
-    }
-    let mut spans: Vec<(i32, i32, i32)> = vec![];
-    for (py, px) in pixels {
-        if let Some((row, start, width)) = spans.last_mut() {
-            if *row == py && *start + *width == px {
-                *width += 1;
-                continue;
-            }
-        }
-        spans.push((py, px, 1));
-    }
-    let mut blocks: Vec<(i32, i32, i32, i32)> = vec![];
-    for (py, px, width) in spans {
-        if let Some(block) = blocks
-            .iter_mut()
-            .rev()
-            .find(|b| b.0 == px && b.2 == width && b.1 + b.3 == py)
-        {
-            block.3 += 1;
-        } else {
-            blocks.push((px, py, width, 1));
-        }
-    }
-    for (px, py, w, h) in blocks {
-        rect(e, px, py, w, h, Some(0));
-    }
-}
 fn text(e: &mut Vec<Value>, s: &str, x: i32, y: i32, size: i32, width: i32) {
     e.push(json!({"type":"text","content":s,"x":x,"y":y,"size":size,"width_limit":width,"weight":if size>=24 {"bold"} else {"regular"}}));
-}
-/// 小字号但需要强调的文本（大字号默认粗体，小字号需显式指定）。
-fn text_bold(e: &mut Vec<Value>, s: &str, x: i32, y: i32, size: i32, width: i32) {
-    e.push(json!({"type":"text","content":s,"x":x,"y":y,"size":size,"width_limit":width,"weight":"bold"}));
 }
 fn text_right(e: &mut Vec<Value>, s: &str, x: i32, y: i32, size: i32, width: i32) {
     e.push(json!({"type":"text","content":s,"x":x,"y":y,"size":size,"width_limit":width,"align":"right","weight":"regular"}));
@@ -346,98 +253,11 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
             None => {}
         }
     }
-    let x = 254;
-    let y = 103;
-    let p = 7;
-    let dx = if animate {
-        [0, 1, 2, 1, 0, -1][phase]
-    } else {
-        0
-    };
-    for (row, line) in PET.iter().enumerate() {
-        let bytes = line.as_bytes();
-        let mut col = 0;
-        while col < bytes.len() {
-            if bytes[col] != b'#' {
-                col += 1;
-                continue;
-            }
-            let start = col;
-            while col < bytes.len() && bytes[col] == b'#' {
-                col += 1;
-            }
-            rect(
-                &mut e,
-                x + start as i32 * p + if row <= 10 { dx } else { 0 },
-                y + row as i32 * p,
-                (col - start) as i32 * p - 1,
-                p - 1,
-                Some(0),
-            );
-        }
-    }
-    if state == Some(Status::Done) {
-        cheer(&mut e, x, y, p);
-    } else {
-        for ex in [x + 4 * p + dx, x + 10 * p + dx] {
-            if state == Some(Status::Error) {
-                rect(&mut e, ex, y + 5 * p, p * 2, 3, Some(0));
-                rect(&mut e, ex + p, y + 5 * p, 3, p * 2, Some(0));
-            } else {
-                rect(
-                    &mut e,
-                    ex,
-                    y + 5 * p,
-                    p,
-                    if phase == 3 { 2 } else { p * 2 },
-                    Some(0),
-                );
-            }
-        }
-        rect(
-            &mut e,
-            x + 7 * p + dx,
-            y + 8 * p,
-            p * 2,
-            if state == Some(Status::Waiting) {
-                p * 2
-            } else {
-                p
-            },
-            Some(0),
-        );
-    }
-    if working {
-        rect(&mut e, x + 2 * p, y + 13 * p, 12 * p, 3 * p, Some(255));
-        rect(&mut e, x + 2 * p, y + 13 * p, 12 * p, 3 * p, None);
-        for col in 0..4 {
-            rect(&mut e, x + (4 + 2 * col) * p, y + 14 * p, p, 1, Some(0));
-        }
-        rect(
-            &mut e,
-            285,
-            if phase % 2 == 0 { 193 } else { 185 },
-            8,
-            7,
-            Some(0),
-        );
-        rect(
-            &mut e,
-            327,
-            if phase % 2 == 1 { 193 } else { 185 },
-            8,
-            7,
-            Some(0),
-        );
-    }
-    if state == Some(Status::Done) {
-        text(&mut e, "完成！", 274, 246, 18, 105);
-    }
-    if matches!(state, Some(Status::Waiting | Status::Unknown)) {
-        // 分隔线在 y=82、桌宠顶边在 y=103。20 号粗体字高约 15px，基线 101 时
-        // 字顶 86、字底 101，上下各留 3px 与 2px，既不压线也不碰桌宠。
-        text_bold(&mut e, "?", 354, 101, 20, 26);
-    }
+    // 像素喵：30×40 点阵、4 倍像素，落在右侧 120×160 的区域。
+    // 旧版是 16×16 字符点阵、五官硬编码，状态只能靠外挂符号表达；
+    // 现在形象与表情都由 sprite 画，这里只决定位置和动画拍。
+    sprite::draw(&mut e, 254, 98, 4, state, phase);
+
     rect(&mut e, 16, 271, 368, 0, None);
     // 左下角：当前展示会话的上下文占用（读 WorkBuddy 的 session_usage.used/size）。
     // 选它的原因：本地精确可读、实时更新，且直接决定「还能聊多久」——
