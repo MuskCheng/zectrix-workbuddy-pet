@@ -58,7 +58,8 @@ cargo build --locked --release
 ```bat
 workbuddy-pet init                               首次引导：检查配置 → 连设备 → 预览 → 确认推送 → 自启
 workbuddy-pet sessions                           列出本机会话及推导状态与清单进度（诊断）
-workbuddy-pet preview [--demo waiting] [--session <会话ID>] [--out 路径]
+workbuddy-pet skin list|set <id>|current         查看/切换 Buddy 图鉴造型（守护下一帧生效）
+workbuddy-pet preview [--demo waiting] [--session <会话ID>] [--out 路径] [--skin <id>]
                                                  渲染 400×300 预览 PNG，不连设备；
                                                  --session 只看指定会话（不落盘）
 workbuddy-pet scene [--demo 状态]                打印布局 JSON（调试版式）
@@ -80,6 +81,20 @@ workbuddy-pet forget                             删除本机状态缓存
 - `--demo` 的演示画面右上角标注「演示」、底栏显示「演示数据」，不写入任务历史，
   也不代表真实任务进度。
 - `--format` 默认 `gray16`（16 级灰阶）；`gray4`、`mono` 刷新更快但细节更少。
+
+## 换造型
+
+四套造型共用表情与状态符，只换帽子/服装/道具：`pixel` 像素喵（默认，针织帽 + 光剑圆盾）、
+`abacus` 金算喵（兜帽 + 算盘账本）、`fortune` 暴富喵（黑金外套 + 金条公文包）、
+`astro` 星际喵（白色宇航服 + 猫爪旗）。`skin list` 看全部，`skin set astro` 或
+`skin set 星际喵` 切换，`skin current` 查当前。
+
+选中值存在 `state.json` 的 `model.settings.pet_skin`。守护每帧从磁盘读一次，所以换肤
+**不用重启守护、不用重新 `autostart on`**；如果是另一个进程刚写的，`save_store` 的合并
+会以磁盘值为准，不会被守护内存里的旧快照盖回去。旧配置没有这个字段时默认 `pixel`。
+
+想临时试看而不改设置：`preview --demo working --skin fortune --out .\fortune.png`，
+`push` / `run` 同样接受 `--skin`。
 
 ## 设备占用策略
 

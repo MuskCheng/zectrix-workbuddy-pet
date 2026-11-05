@@ -94,7 +94,16 @@ pub struct Settings {
     pub stale_minutes: u32,
     pub sound_enabled: bool,
     pub volume: u8,
+    /// 当前 Buddy 造型 id（sprite::Skin）。老 state.json 没这个字段，
+    /// `default_pet_skin` 让它退回像素喵，升级不会把画面换成别的猫。
+    #[serde(default = "default_pet_skin")]
+    pub pet_skin: String,
 }
+
+fn default_pet_skin() -> String {
+    "pixel".into()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -103,6 +112,7 @@ impl Default for Settings {
             stale_minutes: 15,
             sound_enabled: true,
             volume: 90,
+            pet_skin: default_pet_skin(),
         }
     }
 }

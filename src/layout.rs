@@ -253,10 +253,10 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
             None => {}
         }
     }
-    // 像素喵：30×40 点阵、4 倍像素，落在右侧 120×160 的区域。
-    // 旧版是 16×16 字符点阵、五官硬编码，状态只能靠外挂符号表达；
-    // 现在形象与表情都由 sprite 画，这里只决定位置和动画拍。
-    sprite::draw(&mut e, 254, 98, 4, state, phase);
+    // 图鉴造型：30×40 点阵、4 倍像素，落在右侧 120×160 的区域。
+    // 形象、服装与道具由 sprite 按 skin 画，这里只决定位置与动画拍。
+    let skin = sprite::Skin::parse(&model.settings.pet_skin).unwrap_or_default();
+    sprite::draw(&mut e, 254, 98, 4, skin, state, phase);
 
     rect(&mut e, 16, 271, 368, 0, None);
     // 左下角：当前展示会话的上下文占用（读 WorkBuddy 的 session_usage.used/size）。

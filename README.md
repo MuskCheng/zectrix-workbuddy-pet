@@ -47,20 +47,20 @@ Note 4C 不在兼容范围内。
 #### 下载即用（最快，无需编译）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.1.6-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
+`workbuddy-pet-0.2.0-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
 （约 5.4 MB），不依赖 .NET、不依赖 VC++ 运行库、不需要 Rust 工具链，也不用管 SDK 目录：
 
 ```powershell
-.\workbuddy-pet-0.1.6-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
+.\workbuddy-pet-0.2.0-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
 Start-Sleep 9                                                # 固件释放单连接约需 8 秒
-.\workbuddy-pet-0.1.6-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
-.\workbuddy-pet-0.1.6-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
+.\workbuddy-pet-0.2.0-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
+.\workbuddy-pet-0.2.0-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
 ```
 
 下载页同时给出 `SHA256SUMS.txt`，可核对文件完整性：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.1.6-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.2.0-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 二进制仍然**只是宠物程序**：它读本机 WorkBuddy 的会话数据，并直接连局域网里的 Note 4；
@@ -171,7 +171,7 @@ Start-Sleep 9                                                # 固件释放单�
 
 ```powershell
 # 下载即用
-.\workbuddy-pet-0.1.6-windows-x64.exe autostart on --target <IP>
+.\workbuddy-pet-0.2.0-windows-x64.exe autostart on --target <IP>
 # 编译安装
 .\target\release\workbuddy-pet.exe autostart on --target <IP>
 ```
@@ -219,6 +219,38 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 设置与任务记录都在 `%LOCALAPPDATA%\zectrix-workbuddy-pet`，换 exe 不会丢。
 
 完整命令、按键与提示音细节见 [USAGE.md](USAGE.md)。
+
+## 换造型（Buddy 图鉴）
+
+内置四只按 WorkBuddy Buddy 图鉴重绘的机器猫，都是同一套骨架 + 六种状态表情，只换帽子、
+服装与道具——这样换装不会把「正在工作 / 等你处理 / 完成」的表达弄丢。
+
+| id | 名字 | 识别点 |
+| --- | --- | --- |
+| `pixel` | 像素喵 | 针织尖帽 · 光剑与圆盾 · 8-bit 冒险家（**默认**） |
+| `abacus` | 金算喵 | 深色兜帽 · 连帽衫抽绳 · 算盘与账本 |
+| `fortune` | 暴富喵 | 近黑机能外套 · 白翻领 · 大耳机 · 金条与公文包 |
+| `astro` | 星际喵 | 白色宇航服 · 头盔与背包 · 猫爪旗 |
+
+![四套造型 × 六种状态](docs/skins.png)
+
+*图中四列依次为像素喵 / 金算喵 / 暴富喵 / 星际喵，六行依次为工作 / 等待 / 完成 /
+错误 / 停止 / 未知。原尺寸取自 400×300 画面右侧的宠物区。*
+
+```powershell
+.\workbuddy-pet.exe skin list          # 看全部造型与当前选中
+.\workbuddy-pet.exe skin set astro     # 切换（写「星际喵」也可以）
+.\workbuddy-pet.exe skin current       # 只看当前
+```
+
+选中的造型存在 `state.json` 的 `model.settings.pet_skin`。守护每帧从磁盘读一次，
+**不用重启、不用重新 `autostart on`**，最多 2 秒后下一次刷新就换过来；旧配置没有这个字段时
+默认像素喵。只想试看、不想改设置，就给命令加 `--skin <id>`：
+
+```powershell
+.\workbuddy-pet.exe preview --demo working --skin fortune --out .\fortune.png   # 本地出图，不连设备
+.\workbuddy-pet.exe push --demo working --skin fortune                          # 只推这一次
+```
 
 ## 状态与操作
 

@@ -12,7 +12,9 @@ use workbuddy_pet::{
     device, layout,
     model::{Event as TaskEvent, Model, Status, Task},
     raster::{self, Fonts},
-    sound, uia,
+    sound,
+    sprite::Skin,
+    uia,
     workbuddy::{open_readonly_db, Watcher},
 };
 use zectrix_sdk::{Device, ImageFormat};
@@ -428,6 +430,7 @@ fn cmd_autostart(args: &Args) -> Result<()> {
         .unwrap_or("status")
         .to_ascii_lowercase();
     let store = load_store();
+    let skin = Skin::parse(&store.model.settings.pet_skin).unwrap_or_default();
     let target = args.get("target").map(str::to_string).or(store.target);
     match action.as_str() {
         "on" | "enable" | "install" => {
@@ -484,6 +487,7 @@ fn cmd_autostart(args: &Args) -> Result<()> {
                 "保存的目标：{}",
                 target.unwrap_or_else(|| "（自动发现）".into())
             );
+            println!("当前造型：{}（{}）", skin.name(), skin.id());
             println!(
                 "WorkBuddy 进程：{}",
                 if workbuddy_running() {
@@ -565,6 +569,20 @@ struct Store {
     /// 否则写入合并时会把它当成默认值又让磁盘旧值盖回去。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     idle_grace: Option<u32>,
+    /// 本次 save 是否要**显式**写入造型。守护内存里的 store 是启动时快照，
+    /// 若整份回写会把 `skin set` 刚改的造型盖回去；只有 `skin set` 自己置 true。
+    #[serde(skip)]
+    skin_explicit: bool,
+}
+
+/// 从磁盘读当前造型：守护每帧刷新一次，换肤后最多 2 秒就能上屏，
+/// 不必重启守护，也不会被它内存里的旧快照覆盖。
+fn disk_pet_skin() -> Option<String> {
+    let bytes = std::fs::read(state_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v["model"]["settings"]["pet_skin"]
+        .as_str()
+        .map(str::to_string)
 }
 
 /// 任务完成后多久没有新任务就交还设备：5 分钟。
@@ -584,6 +602,7 @@ impl Default for Store {
             format: default_format(),
             announced: None,
             idle_grace: None,
+            skin_explicit: false,
         }
     }
 }
@@ -638,6 +657,11 @@ fn save_store(store: &Store) -> Result<()> {
         }
         if out.idle_grace.is_none() {
             out.idle_grace = disk.idle_grace;
+        }
+        // 造型以磁盘为准：守护可能还抱着几分钟前的内存快照。
+        // 只有 `skin set`（skin_explicit）才有权把它写回去。
+        if !store.skin_explicit {
+            out.model.settings.pet_skin = disk.model.settings.pet_skin;
         }
     }
     let tmp = path.with_extension("json.tmp");
@@ -896,6 +920,13 @@ async fn push_if_changed(
     frame: usize,
     last_sig: &mut Option<String>,
 ) -> bool {
+    // 换肤是另一个进程写 state.json：每帧从磁盘取一次，守护不用重启。
+    // 放进签名渲染之前，皮肤一变这一帧就会因为 sig 不同而刷到设备上。
+    if let Some(s) = disk_pet_skin() {
+        if s != model.settings.pet_skin {
+            model.settings.pet_skin = s;
+        }
+    }
     let phase = if model.settings.animation { frame } else { 0 };
     let mut scene = layout::draw(model, now(), phase);
     let mut sig = scene.to_string();
@@ -1012,7 +1043,19 @@ fn label_of(model: &Model) -> String {
         .to_string()
 }
 
+/// `--skin` 只覆盖本次预览/推送，不落盘：先看效果再决定要不要 `skin set`。
 fn with_model(args: &Args, store: &mut Store) -> Model {
+    let mut model = with_model_inner(args, store);
+    if let Some(v) = args.get("skin") {
+        match Skin::parse(v) {
+            Some(s) => model.settings.pet_skin = s.id().into(),
+            None => eprintln!("未知造型 {v}，用 `skin list` 看可选造型；本次沿用 {}", model.settings.pet_skin),
+        }
+    }
+    model
+}
+
+fn with_model_inner(args: &Args, store: &mut Store) -> Model {
     let mut model = store.model.clone();
     match args.get("demo").map(parse_status) {
         Some(Ok(demo)) => {
@@ -1043,6 +1086,65 @@ fn with_model(args: &Args, store: &mut Store) -> Model {
             model
         }
     }
+}
+
+/// 位置参数：Args 把命令后的裸词依次存成 argN。
+fn positional(args: &Args) -> Vec<&str> {
+    args.flags
+        .iter()
+        .filter(|(k, _)| k.starts_with("arg"))
+        .map(|(_, v)| v.as_str())
+        .collect()
+}
+
+/// Buddy 图鉴造型：list / set，落盘到 state.json，守护下一帧自动生效。
+fn cmd_skin(args: &Args) -> Result<()> {
+    let pos = positional(args);
+    let store = load_store();
+    let current = Skin::parse(&store.model.settings.pet_skin).unwrap_or_default();
+    let action = pos.first().copied().unwrap_or("list");
+    match action {
+        "list" | "ls" => {
+            println!("Buddy 图鉴（当前：{} · {}）", current.name(), current.id());
+            for s in Skin::ALL {
+                println!(
+                    "  {} {:<8} {:<10} {}",
+                    if s == current { "*" } else { " " },
+                    s.id(),
+                    s.name(),
+                    s.desc()
+                );
+            }
+            println!("\n切换：workbuddy-pet skin set <id>");
+            println!("临时试看：workbuddy-pet preview --demo working --skin <id> --out <路径>");
+            Ok(())
+        }
+        "current" | "now" => {
+            println!("{}（{}）", current.name(), current.id());
+            Ok(())
+        }
+        "set" => {
+            let id = pos
+                .get(1)
+                .context("用法：workbuddy-pet skin set <pixel|abacus|fortune|astro>")?;
+            set_skin(id)
+        }
+        other => set_skin(other),
+    }
+}
+
+fn set_skin(value: &str) -> Result<()> {
+    let skin = Skin::parse(value).with_context(|| {
+        format!("未知造型 {value}；可用 {}", Skin::ALL.iter().map(|s| s.id()).collect::<Vec<_>>().join(" / "))
+    })?;
+    let mut store = load_store();
+    store.model.settings.pet_skin = skin.id().into();
+    // 显式写入：否则 save_store 的合并会认为「磁盘值更权威」而把本次切换吞掉。
+    store.skin_explicit = true;
+    save_store(&store)?;
+    println!("已切换造型：{}（{}）", skin.name(), skin.id());
+    println!("守护下一帧自动生效；想立刻看一次：workbuddy-pet push --demo working");
+    Ok(())
 }
 
 async fn cmd_preview(args: &Args) -> Result<()> {
@@ -1414,6 +1516,12 @@ async fn cmd_run(args: &Args) -> Result<()> {
         .map(str::to_string)
         .or(store.target.clone());
     let mut model = store.model.clone();
+    // run 的 --skin 只作用于本次会话（守护传下来的参数也算），不落盘。
+    if let Some(v) = args.get("skin") {
+        if let Some(s) = Skin::parse(v) {
+            model.settings.pet_skin = s.id().into();
+        }
+    }
     let mut watcher = Watcher::new(workbuddy_root());
     let fonts = Fonts::load()?;
 
@@ -1740,10 +1848,11 @@ fn usage() {
 
 用法：
   workbuddy-pet init    [--target IP|ID]                           首次使用引导：检查配置 → 连设备 → 预览 → 确认推送 → 自启
-  workbuddy-pet preview [--demo <状态>] [--out 路径] [--frame N] [--session <ID>]
+  workbuddy-pet preview [--demo <状态>] [--out 路径] [--frame N] [--session <ID>] [--skin <id>]
                                                           渲染 400×300 预览，不连设备（--session 只看该会话）
   workbuddy-pet scene   [--demo <状态>]                            打印布局 JSON（调试用）
   workbuddy-pet sessions                                           列出可跟随的本机会话、状态与清单进度
+  workbuddy-pet skin     list|set <id>|current                        查看/切换 Buddy 图鉴造型（守护下一帧生效）
   workbuddy-pet check   [--target IP|ID]                           只核对设备，不推画面
   workbuddy-pet sound   --status waiting|done [--target IP|ID] [--volume 0-100]
                                                           只播放一次提示音
@@ -1763,6 +1872,7 @@ fn usage() {
 
 状态：working / waiting / done / error / stopped / unknown / idle
   演示状态带「演示」标记，不写入任务历史，也不代表真实任务进度。
+造型：pixel 像素喵 / abacus 金算喵 / fortune 暴富喵 / astro 星际喵
 
 设备需与电脑同一局域网，并在设备上开启「设置 → 网络同步 → 待机保持 Wi-Fi」。
 "#
@@ -1784,6 +1894,7 @@ async fn main() {
             }
         }
         "sessions" | "ls" => cmd_sessions(&args).await,
+        "skin" | "buddy" | "pet" => cmd_skin(&args),
         "init" | "setup" | "guide" => cmd_init(&args).await,
         "check" => cmd_check(&args).await,
         "sound" | "tone" => cmd_sound(&args).await,
@@ -1947,5 +2058,30 @@ mod tests {
         assert_eq!(parse_heartbeat("4242\n"), None);
         assert_eq!(parse_heartbeat(""), None);
         assert_eq!(parse_heartbeat("abc\ndef\n"), None);
+    }
+
+    #[test]
+    fn old_state_without_skin_defaults_to_pixel() {
+        // v0.1.6 及更早的 state.json 没有 pet_skin：升级后必须还是像素喵。
+        let old = r#"{"model":{"settings":{"follow_enabled":true,"animation":true,
+            "stale_minutes":15,"sound_enabled":true,"volume":90}},
+            "target":"192.168.50.123","format":"gray16"}"#;
+        let store: Store = serde_json::from_str(old).unwrap();
+        assert_eq!(store.model.settings.pet_skin, "pixel");
+        assert_eq!(store.target.as_deref(), Some("192.168.50.123"));
+        assert!(!store.skin_explicit);
+    }
+
+    #[test]
+    fn skin_survives_a_round_trip_and_explicit_flag_stays_local() {
+        let mut store = Store::default();
+        store.model.settings.pet_skin = "astro".into();
+        store.skin_explicit = true;
+        let bytes = serde_json::to_vec(&store).unwrap();
+        // 显式标记只在内存里：不能污染 state.json，更不能让守护下次读成 true。
+        assert!(!String::from_utf8_lossy(&bytes).contains("skin_explicit"));
+        let back: Store = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back.model.settings.pet_skin, "astro");
+        assert!(!back.skin_explicit);
     }
 }
