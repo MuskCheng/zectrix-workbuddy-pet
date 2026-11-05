@@ -1,7 +1,8 @@
 # WorkBuddy 宠物（ZECTRIX Note 4）
 
 让像素宠物显示真实的 WorkBuddy 任务状态。作为独立本机程序运行于 Windows，当前支持 Note 4。
-设备固件必须与本地推送 SDK 配套；`zectrix-sdk` 0.1.0 对应固件 3.7.2。Note 4C 不在兼容范围内。
+设备固件必须与本地推送 SDK 配套；`zectrix-sdk` 0.2.0 对应固件 3.7.5（3.7.2 实测仍可连接）。
+Note 4C 不在兼容范围内。
 
 ![宠物画面：任务进行中](docs/preview.png)
 
@@ -26,7 +27,7 @@
 | 项目 | 要求 |
 | --- | --- |
 | 设备 | ZECTRIX Note 4（`zectrix-s3-epaper-4.2`），画布 400×300 |
-| 固件 | 3.7.2（`zectrix-sdk` 0.1.0 配套）。**不支持 Note 4C**，其他固件不承诺 |
+| 固件 | 3.7.5（`zectrix-sdk` 0.2.0 配套）；3.7.2 实测仍可连接。**不支持 Note 4C**，其他固件不承诺 |
 | 系统 | Windows 10/11 **x64**（实测 Windows 11 专业版 / i5-12500H / rustc 1.99.1 / CMake 4.4.4） |
 | 架构边界 | 只发 x64 二进制：32 位 Windows 不支持；ARM64 设备可走 Win11 的 x64 模拟但**未实测**；Windows 7/8 未验证 |
 | 网络 | 设备与电脑在同一局域网；设备上开启「设置 → 网络同步 → 待机保持 Wi-Fi」 |
@@ -46,20 +47,20 @@
 #### 下载即用（最快，无需编译）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.1.5-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
+`workbuddy-pet-0.1.6-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
 （约 5.4 MB），不依赖 .NET、不依赖 VC++ 运行库、不需要 Rust 工具链，也不用管 SDK 目录：
 
 ```powershell
-.\workbuddy-pet-0.1.5-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
+.\workbuddy-pet-0.1.6-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
 Start-Sleep 9                                                # 固件释放单连接约需 8 秒
-.\workbuddy-pet-0.1.5-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
-.\workbuddy-pet-0.1.5-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
+.\workbuddy-pet-0.1.6-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
+.\workbuddy-pet-0.1.6-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
 ```
 
 下载页同时给出 `SHA256SUMS.txt`，可核对文件完整性：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.1.5-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.1.6-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 二进制仍然**只是宠物程序**：它读本机 WorkBuddy 的会话数据，并直接连局域网里的 Note 4；
@@ -170,7 +171,7 @@ Start-Sleep 9                                                # 固件释放单�
 
 ```powershell
 # 下载即用
-.\workbuddy-pet-0.1.5-windows-x64.exe autostart on --target <IP>
+.\workbuddy-pet-0.1.6-windows-x64.exe autostart on --target <IP>
 # 编译安装
 .\target\release\workbuddy-pet.exe autostart on --target <IP>
 ```
@@ -401,4 +402,4 @@ WorkBuddy 正在运行，默认忽略）。模块分工：
 ## 许可
 
 MIT。模型 / 布局 / 音效逻辑复用自 [zectrix-agent-pet](https://github.com/itopinion/zectrix-agent-pet)
-0.3.4（MIT），设备通道使用 [zectrix-local-push-sdk](https://github.com/itopinion/zectrix-local-push-sdk) 0.1.0。
+0.3.4（MIT），设备通道使用 [zectrix-local-push-sdk](https://github.com/itopinion/zectrix-local-push-sdk) 0.2.0。
