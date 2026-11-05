@@ -1144,6 +1144,7 @@ fn cmd_skin(args: &Args) -> Result<()> {
                 );
             }
             println!("\n切换：workbuddy-pet skin set <id>");
+            println!("设备上：长按上/下键挨个换（设备正在显示宠物时即可，换完立刻上屏并记住）");
             println!("临时试看：workbuddy-pet preview --demo working --skin <id> --out <路径>");
             Ok(())
         }
@@ -1173,6 +1174,34 @@ fn set_skin(value: &str) -> Result<()> {
     println!("已切换造型：{}（{}）", skin.name(), skin.id());
     println!("守护下一帧自动生效；想立刻看一次：workbuddy-pet push --demo working");
     Ok(())
+}
+
+/// 图鉴里的下一只/上一只，走到头绕回去。
+///
+/// 单独拎出来是为了能单测：`cycle_skin` 要落盘，测试里不该碰 state.json。
+fn step_skin(cur: Skin, step: i32) -> Skin {
+    let n = Skin::ALL.len() as i32;
+    let at = Skin::ALL.iter().position(|s| *s == cur).unwrap_or(0) as i32;
+    Skin::ALL[(((at + step) % n + n) % n) as usize]
+}
+
+/// 设备端换造型：内存、磁盘一起改，下一次渲染就能取到。
+///
+/// 必须落盘——`push_if_changed` 每帧先从 `state.json` 读一次造型（那是
+/// `skin set` 与守护之间的唯一同步点），只改内存会被它当场盖回去。
+/// `skin_explicit` 只在这次写入时置位，否则 `save_store` 的合并规则会认为
+/// 「磁盘上的旧值更权威」，把刚换的猫吞掉。
+fn cycle_skin(model: &mut Model, store: &mut Store, step: i32) -> Skin {
+    let cur = Skin::parse(&model.settings.pet_skin).unwrap_or_default();
+    let next = step_skin(cur, step);
+    model.settings.pet_skin = next.id().into();
+    store.model = model.clone();
+    store.skin_explicit = true;
+    if let Err(e) = save_store(store) {
+        eprintln!("造型保存失败：{e}");
+    }
+    store.skin_explicit = false;
+    next
 }
 
 async fn cmd_preview(args: &Args) -> Result<()> {
@@ -1625,17 +1654,40 @@ async fn cmd_run(args: &Args) -> Result<()> {
                 match event {
                     Ok(Some(zectrix_sdk::Event::Key { key, action })) => {
                         println!("[按键] {key:?} {action:?}");
-                        if matches!(action, zectrix_sdk::KeyAction::Short) {
-                            match key {
-                                // 上下键只在任务之间翻页/选择；选项交互已取消
-                                //（设备无法替你点电脑上的选项，等待时只提示回电脑）。
-                                zectrix_sdk::Key::Up => model.cycle(-1, now()),
-                                zectrix_sdk::Key::Down => model.cycle(1, now()),
-                                // 确认 = 回到首页并恢复自动跟随；不批准任何操作。
-                                zectrix_sdk::Key::Confirm => model.selected = None,
+                        // 短按翻任务、长按换造型：两个手势各占一个，互不抢。
+                        // 设备只上报「上下短按」「上下长按」「确认短按」三种
+                        // （确认长按被固件的录音流程消费），所以能用的组合正好够。
+                        let handled = match (key, action) {
+                            // 上下键只在任务之间翻页/选择；选项交互已取消
+                            //（设备无法替你点电脑上的选项，等待时只提示回电脑）。
+                            (zectrix_sdk::Key::Up, zectrix_sdk::KeyAction::Short) => {
+                                model.cycle(-1, now());
+                                true
                             }
-                            // 翻页/选项都是用户动作，立刻响应，不等下一次扫描。
-                            if push_if_changed(
+                            (zectrix_sdk::Key::Down, zectrix_sdk::KeyAction::Short) => {
+                                model.cycle(1, now());
+                                true
+                            }
+                            // 确认 = 回到首页并恢复自动跟随；不批准任何操作。
+                            (zectrix_sdk::Key::Confirm, zectrix_sdk::KeyAction::Short) => {
+                                model.selected = None;
+                                true
+                            }
+                            // 长按：照着 Buddy 图鉴挨个换，换完立刻上屏。
+                            (zectrix_sdk::Key::Up, zectrix_sdk::KeyAction::Long) => {
+                                let s = cycle_skin(&mut model, &mut store, -1);
+                                println!("[造型] 长按上键 → {}（{}）", s.name(), s.id());
+                                true
+                            }
+                            (zectrix_sdk::Key::Down, zectrix_sdk::KeyAction::Long) => {
+                                let s = cycle_skin(&mut model, &mut store, 1);
+                                println!("[造型] 长按下键 → {}（{}）", s.name(), s.id());
+                                true
+                            }
+                            _ => false,
+                        };
+                        if handled
+                            && push_if_changed(
                                 &dev,
                                 &mut model,
                                 &mut store,
@@ -1645,9 +1697,8 @@ async fn cmd_run(args: &Args) -> Result<()> {
                                 &mut last_sig,
                             )
                             .await
-                            {
-                                frame = (frame + 1) % 6;
-                            }
+                        {
+                            frame = (frame + 1) % 6;
                         }
                     }
                     Ok(Some(zectrix_sdk::Event::RecordingFinished { audio, reason })) => {
@@ -2108,6 +2159,20 @@ mod tests {
         assert_eq!(parse_heartbeat("4242\n"), None);
         assert_eq!(parse_heartbeat(""), None);
         assert_eq!(parse_heartbeat("abc\ndef\n"), None);
+    }
+
+    #[test]
+    fn device_long_press_cycles_skins() {
+        // 长按一下换一只，走到头绕回去，正反两个方向都要对。
+        assert_eq!(step_skin(Skin::Pixel, 1), Skin::Abacus);
+        assert_eq!(step_skin(Skin::Astro, 1), Skin::Pixel);
+        assert_eq!(step_skin(Skin::Pixel, -1), Skin::Astro);
+        // 四只一轮回：连按四次回到原样，不会越界 panic。
+        let mut s = Skin::Pixel;
+        for _ in 0..4 {
+            s = step_skin(s, 1);
+        }
+        assert_eq!(s, Skin::Pixel);
     }
 
     #[test]

@@ -59,6 +59,7 @@ cargo build --locked --release
 workbuddy-pet init                               首次引导：检查配置 → 连设备 → 预览 → 确认推送 → 自启
 workbuddy-pet sessions                           列出本机会话及推导状态与清单进度（诊断）
 workbuddy-pet skin list|set <id>|current         查看/切换 Buddy 图鉴造型（守护下一帧生效）
+                                                 设备上长按上/下键也能换：短按翻任务、长按换造型
 workbuddy-pet preview [--demo waiting] [--session <会话ID>] [--out 路径] [--skin <id>]
                                                  渲染 400×300 预览 PNG，不连设备；
                                                  --session 只看指定会话（不落盘）

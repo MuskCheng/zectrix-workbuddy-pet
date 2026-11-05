@@ -47,20 +47,20 @@ Note 4C 不在兼容范围内。
 #### 下载即用（最快，无需编译）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.2.1-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
+`workbuddy-pet-0.3.0-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
 （约 5.4 MB），不依赖 .NET、不依赖 VC++ 运行库、不需要 Rust 工具链，也不用管 SDK 目录：
 
 ```powershell
-.\workbuddy-pet-0.2.1-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
+.\workbuddy-pet-0.3.0-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
 Start-Sleep 9                                                # 固件释放单连接约需 8 秒
-.\workbuddy-pet-0.2.1-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
-.\workbuddy-pet-0.2.1-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
+.\workbuddy-pet-0.3.0-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
+.\workbuddy-pet-0.3.0-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
 ```
 
 下载页同时给出 `SHA256SUMS.txt`，可核对文件完整性：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.2.1-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.3.0-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 二进制仍然**只是宠物程序**：它读本机 WorkBuddy 的会话数据，并直接连局域网里的 Note 4；
@@ -171,7 +171,7 @@ Start-Sleep 9                                                # 固件释放单�
 
 ```powershell
 # 下载即用
-.\workbuddy-pet-0.2.1-windows-x64.exe autostart on --target <IP>
+.\workbuddy-pet-0.3.0-windows-x64.exe autostart on --target <IP>
 # 编译安装
 .\target\release\workbuddy-pet.exe autostart on --target <IP>
 ```
@@ -242,6 +242,10 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 .\workbuddy-pet.exe skin set astro     # 切换（写「星际喵」也可以）
 .\workbuddy-pet.exe skin current       # 只看当前
 ```
+
+**在设备上直接挑**：设备正在显示宠物时（有任务在跑，或任务刚结束的 5 分钟内），
+**长按上键切换到上一只、长按下键切换到下一只**，换完立刻重画并记住，不用碰电脑。
+短按上下仍然是翻任务，两个手势分开，不会互相干扰。
 
 选中的造型存在 `state.json` 的 `model.settings.pet_skin`。守护每帧从磁盘读一次，
 **不用重启、不用重新 `autostart on`**，最多 2 秒后下一次刷新就换过来；旧配置没有这个字段时
