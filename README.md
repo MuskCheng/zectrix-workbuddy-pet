@@ -3,10 +3,11 @@
 让像素宠物显示真实的 WorkBuddy 任务状态。作为独立本机程序运行于 Windows，当前支持 Note 4。
 设备固件必须与本地推送 SDK 配套；`zectrix-sdk` 0.1.0 对应固件 3.7.2。Note 4C 不在兼容范围内。
 
-![宠物实机画面：任务进行中](docs/preview.png)
+![宠物画面：任务进行中](docs/preview.png)
 
-*实机画面，原尺寸 400×300。一次真实推送：任务进行中、宠物在工作，底部是上下文占用与花絮。
-重新生成：`workbuddy-pet preview --out docs/preview.png`。*
+*原尺寸 400×300（图中是演示数据，实机渲染与此一致）。左边是任务状态与进度，右边宠物在工作：
+黑面罩后是白色竖条眼，一手剑一手盾；底部是上下文占用与花絮。
+重新生成：`workbuddy-pet preview --demo working --out docs/preview.png`。*
 
 ## 与 SDK 的边界
 
