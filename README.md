@@ -1,443 +1,155 @@
 # WorkBuddy 宠物（ZECTRIX Note 4）
 
-让像素宠物显示真实的 WorkBuddy 任务状态。作为独立本机程序运行于 Windows，当前支持 Note 4。
-设备固件必须与本地推送 SDK 配套；`zectrix-sdk` 0.2.0 对应固件 3.7.5（3.7.2 实测仍可连接）。
-Note 4C 不在兼容范围内。
+把 WorkBuddy 的实时任务状态显示在 ZECTRIX Note 4 墨水屏上（400×300）。Windows 本机程序：只读本机会话文件、
+局域网直连设备，不上传数据、不写系统目录。
 
 ![宠物画面：任务进行中](docs/preview.png)
 
-*原尺寸 400×300（图中是演示数据，实机渲染与此一致）。左边是任务状态与进度，右边宠物在工作：
-黑面罩后是白色竖条眼，一手剑一手盾；底部是上下文占用与花絮。
-重新生成：`workbuddy-pet preview --demo working --out docs/preview.png`。*
+## ⚠️ 需要人工操作的注意事项
 
-## 与 SDK 的边界
+这几件事 AI 代不了，**部署前先确认**，否则表现为「装好了但设备没画面」。
 
-本仓库以路径依赖引用官方 [zectrix-local-push-sdk](https://github.com/itopinion/zectrix-local-push-sdk)
-（`../zectrix-local-push-sdk`，编译时需并排放一份，见「安装」），**不复制、不修改、不携带** SDK 与固件。
+1. **在设备上打开「待机保持 Wi-Fi」**：设置 → 网络同步 → 待机保持 Wi-Fi（固件 3.7.5 显示为「联网保持」）。
+   不开时设备空闲约 2 分钟就从 Wi-Fi 下线，`ping` 和 `arp` 都找不到它，推送必然失败。
+   若坚持不开，只能在设备上点「连接管理端」主动连过来；本程序暂未监听该请求。
+2. **记下设备 IP**（同一页面显示），下文 `<IP>` 一律替换成它。IP 变了要重跑 `autostart on --target <新IP>`。
+3. **设备同时只允许一个连接**：断开后固件约 8 秒才释放租约。两条命令连着跑会报「设备忙碌」，隔 8 秒重试即可。
+   守护运行期间手动 `check` / `push` 必然报忙碌，这是正常的（连接被守护占着），不是故障。
+4. **编译必须让 SDK 与项目并排**：`Cargo.toml` 用 path 依赖 `../zectrix-local-push-sdk`，只克隆本仓库会编译失败。
+5. **CMake 4.x 必须设** `CMAKE_POLICY_VERSION_MINIMUM=3.5`，否则 SDK 内置的旧版 Opus 脚本直接编译失败。
+6. **支持范围**：Windows 10/11 **x64**；设备仅 Note 4（`zectrix-s3-epaper-4.2`，400×300），**不支持 Note 4C**；
+   固件 3.7.5（`zectrix-sdk` 0.2.0 配套），3.7.2 实测可连。不需要管理员权限、不需要极趣云 API Key。
+7. **升级要先停再换**：`autostart off` → 覆盖 exe → `autostart on`。直接 `autostart on` 也会尝试热替换，
+   但旧进程仍占用副本文件时会**静默沿用旧版**，看起来升级成功其实没换。
 
-- 宠物仓库负责：任务状态、WorkBuddy 跟随、权限提醒、400×300 像素画面、按键、提示音、
-  连接时机与占用策略。
-- SDK 负责：局域网协议、灰度量化（mono / gray4 / gray16）、音频播放、设备事件。
-- 固件由你自己按官方指引升级。本程序不检查、不升级固件，也不自动连接未指定的设备。
+## 部署步骤
 
-`src/device.rs` 是 SDK 的薄封装（打开、推图、播放、读事件、关闭），不实现协议。
+### 1. 拿到程序（三选一）
 
-## 兼容性
-
-| 项目 | 要求 |
-| --- | --- |
-| 设备 | ZECTRIX Note 4（`zectrix-s3-epaper-4.2`），画布 400×300 |
-| 固件 | 3.7.5（`zectrix-sdk` 0.2.0 配套）；3.7.2 实测仍可连接。**不支持 Note 4C**，其他固件不承诺 |
-| 系统 | Windows 10/11 **x64**（实测 Windows 11 专业版 / i5-12500H / rustc 1.99.1 / CMake 4.4.4） |
-| 架构边界 | 只发 x64 二进制：32 位 Windows 不支持；ARM64 设备可走 Win11 的 x64 模拟但**未实测**；Windows 7/8 未验证 |
-| 网络 | 设备与电脑在同一局域网；设备上开启「设置 → 网络同步 → 待机保持 Wi-Fi」 |
-| API Key | 本地直连**不需要**极趣云 API Key；本程序不读取任何账号或密钥 |
-
-## 安装
-
-只支持 Windows 10/11 x64。安装分两步：**先拿到程序**（下面三条路选一条），**再开启跟随**
-（三条路都要做，只有一句 `autostart on`）。
-
-**第二步不能省**。不开启跟随，程序不会自己出现在设备上：只有你手动 `push` / `run` 才有画面，
-关掉终端就停了。开启之后看门狗常驻后台，WorkBuddy 一出现就跟随、有任务才占用设备，
-开机登录后也会自动回来。
-
-### 一、拿到程序（三选一）
-
-#### 下载即用（最快，无需编译）
+**A. 直接下载（最快，无需编译）**
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.3.1-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
-（约 5.4 MB），不依赖 .NET、不依赖 VC++ 运行库、不需要 Rust 工具链，也不用管 SDK 目录：
+`workbuddy-pet-0.3.1-windows-x64.exe`。约 5.4 MB 静态链接单文件，不依赖 .NET、VC++ 运行库或 Rust 工具链。
+可选核对完整性：`(Get-FileHash .\workbuddy-pet-0.3.1-windows-x64.exe -Algorithm SHA256).Hash`，
+对比同页的 `SHA256SUMS.txt`。
+
+**B. 交给脚本（本机一键构建 + 部署）**
 
 ```powershell
-.\workbuddy-pet-0.3.1-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
-Start-Sleep 9                                                # 固件释放单连接约需 8 秒
-.\workbuddy-pet-0.3.1-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
-.\workbuddy-pet-0.3.1-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
+git clone https://github.com/MuskCheng/zectrix-workbuddy-pet.git
+cd zectrix-workbuddy-pet
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1                  # 只构建与测试
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -DeviceIp <IP>   # 再检查设备、推图、开启跟随
 ```
 
-下载页同时给出 `SHA256SUMS.txt`，可核对文件完整性：
+成功判定（三条同时成立）：末尾打印 `DONE`；`target\release\workbuddy-pet.exe` 存在（约 5 MB）；
+测试全部 `ok`、`0 failed`（另有 1 项 `ignored` 需要设备在线，通过数随版本增长）。
+失败按退出码定位：`1` 工具链缺失（脚本会列出 winget 命令，装完重开终端）｜`2` SDK 克隆失败（网络/代理）｜
+`3` 构建失败（多为 MSVC 缺 C++ 组件）｜`4` 测试失败｜`5` 产物缺失｜`6` 连不上设备。
+
+**C. 手动编译**
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.3.1-windows-x64.exe -Algorithm SHA256).Hash
+winget install --id Rustlang.Rustup -e
+winget install --id Kitware.CMake -e
+winget install --id Git.Git -e
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+
+git clone https://github.com/MuskCheng/zectrix-workbuddy-pet.git
+git clone https://github.com/itopinion/zectrix-local-push-sdk.git   # 必须与上个仓库同级
+cd zectrix-workbuddy-pet
+$env:CMAKE_POLICY_VERSION_MINIMUM = '3.5'
+cargo test --locked --release
+cargo build --locked --release      # 产物 target\release\workbuddy-pet.exe
 ```
 
-二进制仍然**只是宠物程序**：它读本机 WorkBuddy 的会话数据，并直接连局域网里的 Note 4；
-不会安装驱动、不写系统目录、不需要管理员权限（开机自启写在当前用户的启动文件夹）。
+首次构建需联网拉依赖并编译 SDK 内置的 Opus，约 3–8 分钟。
 
-上面那次 `push` 只是确认版式，之后设备不会再自动更新——要让它跟随任务，必须走下一节。
+### 2. 核对设备
 
-#### 交给 AI 编译（要改代码时）
-
-把下面这一段原样发给 AI 代理，或自己按「手动安装」做一遍——两者等价，脚本就是手动步骤的封装。
-
-复制这段话给 AI 代理，把 `<设备IP>` 换成设备「设置 → 网络同步」里显示的地址（暂时没有设备就删掉这半句）：
-
-> 安装 https://github.com/MuskCheng/zectrix-workbuddy-pet 。克隆到任意目录，在 PowerShell 里执行该仓库的
-> `scripts\install.ps1` 完成构建与测试；构建成功后用 `-DeviceIp <设备IP>` 再执行一次，检查设备、推一张画面、
-> 开启跟随（`autostart on`，装副本与开机自启并拉起看门狗）。最后跑 `autostart status`，把 exe 路径、
-> 退出码、测试汇总和 status 输出告诉我；失败就按退出码定位原因，不要改动 SDK 或去掉 `--locked`。
-
-给 AI 的硬约束（照做，不要自行发挥）：
-
-1. **只在 Windows x64 上执行**，macOS / Linux 未验证，别尝试。
-2. 仓库可以克隆到**任意目录**，但 `zectrix-local-push-sdk` 必须位于它的**同级目录**（`Cargo.toml` 里是
-   `path = "../zectrix-local-push-sdk"`）。`install.ps1` 会自动把官方 SDK 克隆到该位置，**不要**移动、改名或修改它。
-3. 执行：
-
-   ```powershell
-   cd <克隆目录>\zectrix-workbuddy-pet
-   powershell -ExecutionPolicy Bypass -File scripts\install.ps1
-   powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -DeviceIp <设备IP>
-   ```
-
-   第二条会检查设备、推一张画面、写开机自启；**不传 `-DeviceIp` 就完全不碰设备**。
-4. **成功的判定**（三条同时成立）：末尾打印 `DONE`；`target\release\workbuddy-pet.exe` 存在（约 5 MB）；
-   测试汇总全部 `ok`、`0 failed`（另有 1 项 `ignored` 需要设备在线；通过数随版本增长，不必精确对上）。
-5. **失败按退出码定位**：`1` 工具链缺失（脚本会列出 winget 命令，装完重开终端再跑）｜`2` SDK 克隆失败
-   （网络 / 代理）｜`3` 构建失败（多为 MSVC 缺 C++ 组件，或 `CMAKE_POLICY_VERSION_MINIMUM` 未生效——脚本
-   已设置）｜`4` 测试失败｜`5` 产物缺失｜`6` 连不上设备。
-6. 不要用 `init`（它是交互式引导，会等键盘输入）；非交互等价步骤就是 `check` → `push` → `autostart on`。
-7. 不要改 `Cargo.toml` 的 path 依赖，不要为了「让它过」而删测试，也不要加 `--ignore-rust-version` 之类绕过。
-
-#### 手动安装（与脚本等价）
-
-1. **工具链**：Rust（MSVC 工具链）、CMake、Visual Studio C++ Build Tools、Git。
-
-   ```powershell
-   winget install --id Rustlang.Rustup -e
-   winget install --id Kitware.CMake -e
-   winget install --id Git.Git -e
-   winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-   ```
-
-   装完重开终端确认 `cargo -V`、`cmake --version` 可用；`rustup show` 的默认工具链应为
-   `stable-x86_64-pc-windows-msvc`。
-
-2. **取官方 SDK 到同级目录**：
-
-   ```powershell
-   cd <你想放的目录>
-   git clone https://github.com/MuskCheng/zectrix-workbuddy-pet.git
-   git clone https://github.com/itopinion/zectrix-local-push-sdk.git
-   ```
-
-   两条命令在同一个目录下执行：`zectrix-workbuddy-pet` 与 `zectrix-local-push-sdk` 必须并排。
-
-3. **构建 + 测试**（首次需联网拉依赖，并编译 SDK 内置的 Opus，约 3–8 分钟）：
-
-   ```powershell
-   cd zectrix-workbuddy-pet
-   $env:CMAKE_POLICY_VERSION_MINIMUM = '3.5'
-   cargo test --locked --release
-   cargo build --locked --release
-   ```
-
-   `CMAKE_POLICY_VERSION_MINIMUM=3.5` 不能省：CMake 4.x 对 SDK 内置的旧版 Opus 脚本会报
-   「Compatibility with CMake < 3.5 has been removed」。这是 SDK README 给的处理办法。
-   产物是 `target\release\workbuddy-pet.exe`。
-
-4. **接设备**（`<IP>` 见设备「设置 → 网络同步」）：
-
-   ```powershell
-   .\target\release\workbuddy-pet.exe check  --target <IP>   # 只核对，不推画面
-   .\target\release\workbuddy-pet.exe push   --target <IP>   # 推一张确认版式（与上一条隔 8 秒以上）
-   ```
-
-   设备只允许一个连接，固件在断开后约 8 秒才释放租约：连着跑 `check` 和 `push` 会拿到
-   「设备忙碌」，隔开或重试一次即可（`install.ps1` 已在两处之间等待并自动重试一次）。
-
-   想走交互式引导（生成预览、逐项询问）就用 `workbuddy-pet init`。
-
-5. **开启跟随**（别忘这一步，详见下一节）：
-
-   ```powershell
-   .\target\release\workbuddy-pet.exe autostart on --target <IP>
-   ```
-
-6. **日常使用**：登录 Windows 后在后台待命，有任务才占用设备。升级保留现有设置与任务记录；
-   覆盖 exe 后重启一次守护（`autostart` 无需重设）。
-
-接入时核对到的基线：参照项目 [zectrix-agent-pet](https://github.com/itopinion/zectrix-agent-pet)
-（核查日期 2026-10-20，参考提交 `2c9213d`）、[SDK API 文档](https://github.com/itopinion/zectrix-local-push-sdk/blob/main/docs/API.md)、
-[兼容性清单](https://github.com/itopinion/zectrix-local-push-sdk/blob/main/compatibility.json)。
-**执行前请重新核对当前版本**，接口以当前源码为准。
-
-### 二、开启跟随（必做）
-
-三条路走到这里都一样，只差一句命令。`<IP>` 是设备「设置 → 网络同步」里显示的地址，
-会记进 `state.json`，之后不用再带：
+下文命令默认在 exe 所在目录执行；编译安装的产物在 `target\release\`，换成实际路径或先 `cd` 进去。
+PowerShell 里带空格的路径必须加 `&`（`& "C:\路径\workbuddy-pet.exe"`），直接写路径会被当成字符串报错。
 
 ```powershell
-# 下载即用
-.\workbuddy-pet-0.3.1-windows-x64.exe autostart on --target <IP>
-# 编译安装
-.\target\release\workbuddy-pet.exe autostart on --target <IP>
+.\workbuddy-pet.exe check --target <IP>    # 读电量与信号，不推画面
+Start-Sleep 9                              # 固件释放单连接约需 8 秒
+.\workbuddy-pet.exe push  --target <IP>    # 推一张画面确认版式
 ```
 
-它做四件事：
+`check` 能读出电量、RSSI、`gray16` 即链路正常。报「没有发现可用设备」先按注意事项 1 查联网保持。
 
-1. 把当前 exe 复制到 `%LOCALAPPDATA%\zectrix-workbuddy-pet\bin\workbuddy-pet.exe`，自启项指向这份**副本**
-   （`cargo clean`、移动仓库都不会让它失效）
-2. 在启动文件夹写 `zectrix-workbuddy-pet.vbs`，登录时隐藏窗口拉起看门狗 `supervise`
-3. **立刻**启动看门狗，不用等到下次登录；它每 10 秒看一次守护心跳，守护不在就补一份
-4. 记住目标 IP
+### 3. 开启跟随（必做）
 
-跟随的是 **WorkBuddy 的状态**，不是「开机就推」：守护启动即读本机会话，WorkBuddy 没开就待命、
-不占用设备；WorkBuddy 一有任务才连设备上屏。所以它既随登录自启，也随 WorkBuddy 出现而跟随。
+```powershell
+.\workbuddy-pet.exe autostart on --target <IP>
+```
 
-**装完核对**。副本已经装好，直接调它（在 PowerShell 里带引号的路径要加 `&`，或先 `cd` 进目录）：
+只做这一步，程序才会自己工作：把 exe 复制到 `%LOCALAPPDATA%\zectrix-workbuddy-pet\bin\`，在启动文件夹写
+`zectrix-workbuddy-pet.vbs`，立刻拉起看门狗（每 10 秒补一次守护），并记住 IP。开机登录后自动回来，
+WorkBuddy 没开就待命、不占用设备。
+
+不开启跟随时只有手动 `push` / `run` 有画面，关掉终端就没了。
+
+### 4. 验收
 
 ```powershell
 cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 .\workbuddy-pet.exe autostart status
 ```
 
-四项都对上才算装好：
+四项都要对上：
 
 ```
-自启项：已启用（C:\Users\<你>\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\zectrix-workbuddy-pet.vbs）
+自启项：已启用（...\Startup\zectrix-workbuddy-pet.vbs）
 守护程序：C:\Users\<你>\AppData\Local\zectrix-workbuddy-pet\bin\workbuddy-pet.exe
 看门狗：运行中（pid 12345，心跳 3 秒前）
 守护进程：运行中（pid 12346，心跳 3 秒前）
 ```
 
-心跳超过 20 秒算过期；只要看门狗还在，它会自己把守护补回来（实测杀掉守护约 20 秒恢复）。
-如果看门狗显示「已停止」，重跑一次上面的 `autostart on` 即可。
+心跳超过 20 秒算过期，看门狗会自己补。看门狗显示「已停止」时重跑 `autostart on`。
 
-**不想跟随了**：
+日常行为：任务在跑时占用设备并推送；一轮答完（完成 / 等你处理）后再守 5 分钟，没有新会话就交还设备
+（`--idle-grace 秒数` 可调，`0` 为立即交还）。墨水屏断电保留最后一帧，交还不会让画面消失。
 
-```powershell
-.\workbuddy-pet.exe autostart off
-```
+## 命令速查
 
-它先停看门狗再停守护，最后删掉自启项。顺序不能反——先停守护的话，看门狗会在 10 秒内把它补回来
-（手动在任务管理器里结束守护也一样会回来，属正常行为）。
+| 命令 | 用途 |
+| --- | --- |
+| `check --target <IP>` | 只核对设备，不推画面 |
+| `push [--demo <状态>] [--skin <id>]` | 推一帧当前画面；`--demo` 用演示数据 |
+| `preview [--demo <状态>] [--out 路径]` | 本地渲染 PNG，不连设备 |
+| `autostart on [--target <IP>]` / `off` / `status` | 开启 / 关闭跟随、查看状态 |
+| `skin list` / `skin set <id>` / `skin current` | 换造型（见下） |
+| `sessions` | 列出可跟随的会话及推导状态（诊断） |
+| `run [--target <IP>]` / `watch` / `supervise` | 调试用：常驻推图 / 守护 / 看门狗 |
 
-**升级**：下载新 exe 再跑一次 `autostart on`。它会先停掉旧版本、替换副本、重启看门狗，不用手动 `off`；
-设置与任务记录都在 `%LOCALAPPDATA%\zectrix-workbuddy-pet`，换 exe 不会丢。
+**设备按键**（设备连着时有效）：短按上/下翻任务，短按确认回首页，**长按上/下换造型**（四只循环，立即存盘）。
+任务交还设备后按键到不了程序，属正常。
 
-完整命令、按键与提示音细节见 [USAGE.md](USAGE.md)。
-
-## 换造型（Buddy 图鉴）
-
-内置四只按 WorkBuddy Buddy 图鉴重绘的机器猫，都是同一套骨架 + 六种状态表情，只换帽子、
-服装与道具——这样换装不会把「正在工作 / 等你处理 / 完成」的表达弄丢。
-
-| id | 名字 | 识别点 |
-| --- | --- | --- |
-| `pixel` | 像素喵 | 针织尖帽 · 光剑与圆盾 · 8-bit 冒险家（**默认**） |
-| `abacus` | 金算喵 | 深色兜帽 · 连帽衫抽绳 · 算盘与账本 |
-| `fortune` | 暴富喵 | 近黑机能外套 · 白翻领 · 大耳机 · 金条与公文包 |
-| `astro` | 星际喵 | 白色宇航服 · 头盔与背包 · 猫爪旗 |
-
-![四套造型 × 六种状态](docs/skins.png)
-
-*图中四列依次为像素喵 / 金算喵 / 暴富喵 / 星际喵，六行依次为工作 / 等待 / 完成 /
-错误 / 停止 / 未知。原尺寸取自 400×300 画面右侧的宠物区。*
-
-```powershell
-.\workbuddy-pet.exe skin list          # 看全部造型与当前选中
-.\workbuddy-pet.exe skin set astro     # 切换（写「星际喵」也可以）
-.\workbuddy-pet.exe skin current       # 只看当前
-```
-
-**在设备上直接挑**：设备正在显示宠物时（有任务在跑，或任务刚结束的 5 分钟内），
-**长按上键切换到上一只、长按下键切换到下一只**，换完立刻重画并记住，不用碰电脑。
-短按上下仍然是翻任务，两个手势分开，不会互相干扰。
-
-选中的造型存在 `state.json` 的 `model.settings.pet_skin`。守护每帧从磁盘读一次，
-**不用重启、不用重新 `autostart on`**，最多 2 秒后下一次刷新就换过来；旧配置没有这个字段时
-默认像素喵。只想试看、不想改设置，就给命令加 `--skin <id>`：
-
-```powershell
-.\workbuddy-pet.exe preview --demo working --skin fortune --out .\fortune.png   # 本地出图，不连设备
-.\workbuddy-pet.exe push --demo working --skin fortune                          # 只推这一次
-```
-
-## 状态与操作
-
-- 待命：WorkBuddy 已启动但还没有任务；守护只读会话文件，**不占用设备**。
-- 正在工作：用户刚发起一轮任务；无清单时显示「当前实施状态：正在修改文件 / 正在执行命令」。
-- 等你处理：结构化提问，或主进程上报的确认事件；回到对应 WorkBuddy 窗口处理。
-- 任务完成、遇到问题、已停止：来自明确的生命周期记录。
-- 状态待确认：超过 15 分钟无更新。只表示需要确认，不会自动判成功。
-
-设备左侧是任务名（与 WorkBuddy 侧边栏同源；过长自动换行，超过三行以「…」省略）。同一会话只显示最新一轮。
-最多列出 4 个任务，超过时上下键翻页（末页循环回首页）；4 个以内上下键选择任务；
-确认键恢复首页与自动跟随，**不会**批准 Agent 的任何操作。列表顺序按会话标识固定，
-心跳和状态更新不会换位。
-
-有清单时显示「任务清单 3/7 · 43%」；Agent 主动上报过进度则显示「上报 65%」，两者措辞严格区分，
-未知进度不生成百分比。左下角是当前会话的上下文占用（读 `session_usage.used/size`，每 15 秒查一次，
-整百分比变化才刷屏），右下角是花絮短语——直接镜像 WorkBuddy 界面此刻显示的那条
-（每次确定要刷新页面时采一次、和这一帧一起上屏；没有独立轮询，读不到时回退内置短语池）。
-
-等待确认时播放两短哔，任务完成时播放上行三连音；默认音量 90%，`--volume` 可调，`--no-sound`
-可关。重复状态、启动时的历史回放不会响铃；同一条提醒只响一次（指纹存在 `state.json` 的
-`announced`），设备反复重连也不会重复吵人。播放失败不重试。
-
-### 设备占用
-
-一台设备同一时刻只允许一个连接，所以守护按任务开关设备：
-
-| 阶段 | 行为 | 设备 |
-| --- | --- | --- |
-| WorkBuddy 未启动 | 每 5 秒看一眼进程 | 空闲 |
-| 待命（无任务） | 只读会话文件，不连接 | 空闲 |
-| 任务在跑（工作） | 连接、推送、翻页、响铃 | 被占用 |
-| 一轮答完（完成 / 等你处理） | 再守 5 分钟，看有没有新会话 | 期内占用，期满交还 |
-
-`--idle-grace 120` 可改宽限（秒），`0` 表示任务一结束就交还，值存进 `state.json`。
-**「等你处理」不算活跃任务**：它只代表上一轮已经答完、等用户下一条，所以宽限期一过就
-`close()` 交还设备，不会一直占着。还在跑（工作）的任务才连续占用；这类任务若静默超过
-15 分钟，按「状态待确认」同样交还。设备休眠导致的 `Timeout` 断开只在任务仍活跃时按
-15 秒步长退避重连，连续失败 5 次就停下等下一个任务，不与别的程序抢设备。
-
-### 守护为什么不会自己消失
-
-启动文件夹每次登录只执行一次。守护被任务管理器结束、被新版本覆盖、或者登录项装好之后
-还没重新登录过，都会出现「WorkBuddy 在跑、设备却没人推」。所以登录项拉起的是**看门狗**：
-
-```
-登录 Windows → zectrix-workbuddy-pet.vbs → workbuddy-pet supervise（常驻）
-                                          └─ 每 10 秒看一次心跳，守护不在就补一份
-                                             └─ workbuddy-pet watch（连设备、推画面）
-```
-
-- 守护每 5 秒写 `daemon.hb`，心跳超过 20 秒没更新即视为死亡；实测被杀后约 20 秒恢复。
-- 守护用 `daemon.lock`（PID）保证单实例，重复拉起时后来者静默退出。
-- 这套自启由 `autostart on` 一次性装好，写入细节与装完怎么核对见「安装 → 二、开启跟随」。
-
-**看门狗的死角**：它和守护是父子关系，两者被一起带走时没有第三方能补位。实测在笔记本上
-很常见——合盖进入 Modern Standby 后整组进程被冻结回收，唤醒也不回来；注销会话、从任务管理器
-结束进程树同理。登录项只在登录那一刻执行，机器连着开几天不重启，这段空窗就一直空着。
-
-补位的是 WorkBuddy 自己的 hook：在 `~/.workbuddy/settings.json` 的 `hooks.UserPromptSubmit`
-里挂一条命令，每次提交任务时执行一次 `workbuddy-pet ensure`（幂等：守护在就直接返回，
-不在就拉起）。把下面这段的 `<用户名>` 换成自己的，路径指向
-`%LOCALAPPDATA%\zectrix-workbuddy-pet\hook-ensure.cmd`：
-
-```json
-"hooks": {
-  "UserPromptSubmit": [
-    { "hooks": [ { "type": "command",
-        "command": "\"C:/Users/<用户名>/AppData/Local/zectrix-workbuddy-pet/hook-ensure.cmd\"",
-        "timeout": 10 } ] }
-  ]
-}
-```
-
-用 `.cmd` 包一层，是因为宿主的 hook 执行器在 Windows 上可能走 bash 也可能走 cmd，
-把重定向写成 `>/dev/null` 只在 bash 下成立。脚本里每次执行会往同目录 `hook.log` 追加
-一行时间戳——想确认 hook 到底有没有被调用，看这个文件即可，不用猜。
-
-这条路保的是「你还在用 WorkBuddy」的场景：只要你提交任务，它就会被补上。真正长时间
-无人值守（关机重启后一直没人登录）仍只能靠登录项。计划任务本来更适合做这件事，但在
-受限账户上注册会直接返回「拒绝访问」，实测不可用，所以不作为方案。
-
-装好之后要调命令，先切到副本目录再跑（PowerShell 与 cmd 都适用）：
-
-```powershell
-cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
-.\workbuddy-pet.exe autostart status
-```
-
-不想切目录就加调用运算符 `&`：`& "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin\workbuddy-pet.exe" autostart status`。
-**直接写 `"%LOCALAPPDATA%\...\workbuddy-pet.exe" autostart on` 会报「意外的标记」**——
-这种写法只在 cmd 里成立；PowerShell 把带引号的路径当字符串，后面跟的参数就成了语法错误，与程序无关。
-
-## 本机 WorkBuddy 跟随
-
-守护启动即跟随本机会话，无需额外开关。它只读三处本机数据，全部只取元数据：
-
-- `~/.workbuddy/projects/<项目>/<会话>.jsonl`：轮次开始、结构化提问 / 退出计划、
-  助手消息状态、`todo_write` 清单条目数与完成数。
-- `~/.workbuddy/logs/main.log`：`[TaskNotify] pending: session=<id> kind=question|permission`。
-  **权限确认卡不写会话 JSONL**，这是唯一能覆盖所有确认形态（含写入卡、命令确认、其他会话）的信号源。
-- `~/.workbuddy/workbuddy.db`：`sessions` 表取侧边栏显示的会话名（`custom_title` 优先）与
-  `is_background_automation` 标记，`session_usage` 表取上下文占用。
-
-**定时任务不显示**。调度器发起的后台自动化会话（`is_background_automation = 1`，如每日定时
-领积分、定时摘要）整条不跟随：不上屏、不进任务列表、不参与设备占用判定，已上屏的会在
-下一拍退场。它们按计划反复运行，若当作普通任务跟随，设备会被长期占着交还不了。
-代价也要说清：这类会话弹出的确认卡同样不会提醒——定时任务请写成无人值守可以自己跑完的样子。
-
-任务名与侧边栏一致：侧边栏改名**只写数据库、不写会话文件**，所以程序读库，改名后 15 秒内跟上；
-读不到库时才退到 JSONL 里的 `ai-title`，再退到本轮提问首行。名称会显示在设备上，
-勿在会话名中放置秘密。
-
-这是对本地文件与库表格式的适配，并非 WorkBuddy 的稳定状态 API。格式变化、文件被清理或
-超出扫描范围时可能无法跟随；`main.log` 轮转到扫描窗口之外时，写入确认会退回「写入工具卡住
-10 秒」的启发式，可能误报一次。普通文本提问、失败的工具调用、未知工具都不会被猜成等待或失败。
-
-## 数据
-
-数据在本机 `%LOCALAPPDATA%\zectrix-workbuddy-pet\`：
-
-- `state.json`：设置、最近 100 条任务、设备地址、已提醒指纹。升级保留，不覆盖。
-- `out\`：`preview` / `init` 渲染的 PNG。
-- `watch.log`：守护输出。不含对话内容、账号或密钥。
-
-从早期 `pet4` 目录升级时会复制一份旧 `state.json`（只复制，不删源）。`state.json` 含设备地址，
-不要分享或上传；卸载时用 `workbuddy-pet forget` 删除。
-
-## 开发
-
-```powershell
-cargo fmt
-$env:CMAKE_POLICY_VERSION_MINIMUM = '3.5'
-cargo clippy --locked --release --all-targets
-cargo test --locked --release
-cargo build --locked --release
-```
-
-一键装好并跑完这些的是 `scripts\install.ps1`（`-SkipTests` 可跳过测试）。
-
-54 项测试（状态机、标题解析、去抖、占用判定、定时任务过滤、版式、提示音、花絮定位；另 1 项真机探针需
-WorkBuddy 正在运行，默认忽略）。模块分工：
-`model`（状态机与任务表）、`workbuddy`（本机数据源与信号源）、`layout` + `raster`（场景与灰度 PNG）、
-`sound`（PCM16 合成）、`device`（SDK 封装）、`main`（命令、占用策略、推送循环）。
-
-不连设备也能出图：`workbuddy-pet preview`（`--demo working|waiting|done|error` 看各状态版式，
-演示状态只在内存，不写任务历史，也不代表真实进度）。仅 Windows x64 验证；macOS / Linux 未验证。
-
-## 已知边界
-
-- **积分余额读不到**：那是云端数据，本地无缓存，左下角改显示可精确读取的上下文占用。
-- **不能替你在电脑上点选项**：选项卡片只接受鼠标；模拟键盘能送达窗口但卡片无响应。
-  等待画面只提示「请回电脑确认」。
-- **积分 / 计费类信息不显示**，只读上述三处本机数据。
-- **定时任务不上屏**：后台自动化会话（`is_background_automation`）整条忽略，含它的确认卡——
-  定时任务要写成无人值守能自己跑完的样子。
-- **单连接**：切换程序前先退出旧的，否则会拿到 `Busy`；强杀后固件约 15 秒才释放租约。
-- **`ResultUnknown` 不重试**：SDK 无法确认结果时不重新刷图、不重播，避免重复动作。
-- **提示音是设备提示音**：16 kHz 单声道 PCM16；SDK 不含语音识别、TTS 或大模型。
-- **交互应用需要电脑上的程序持续运行**；推图成功不等于应用安装到了设备。
+**造型**：`pixel` 像素喵（默认）｜`abacus` 金算喵｜`fortune` 暴富喵｜`astro` 星际喵。
+`skin set` 写进 `state.json`，守护下一帧生效，不用重启。也可以用 `--skin` 临时试看不落盘。
 
 ## 排错
 
 | 现象 | 处理 |
 | --- | --- |
-| PowerShell 报「表达式或语句中包含意外的标记 `autostart`」 | 带引号的路径必须加 `&`：`& "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin\workbuddy-pet.exe" autostart on`；或先 `cd` 到该目录再用 `.\workbuddy-pet.exe`。`"路径" 参数` 是 cmd 写法，PowerShell 不认 |
-| `install.ps1` 退出码 1 | 按脚本打印的 winget 命令装工具链，**重开终端**再跑；VS Build Tools 必须含「使用 C++ 的桌面开发」 |
-| 构建报 `link.exe` 找不到 / MSVC 缺失 | 装 VS Build Tools 的 VCTools 工作负载，或用「x64 Native Tools」命令提示符重跑 |
-| 构建报 CMake < 3.5 兼容错误 | 设 `CMAKE_POLICY_VERSION_MINIMUM=3.5` 后重试（脚本已自动设置） |
-| 克隆 SDK 失败（TLS / 超时） | 检查代理；可试 `git config --global http.sslBackend schannel` 后重试 |
-| `--locked` 报锁文件不一致 | 只在确实改过依赖时去掉 `--locked` 更新 `Cargo.lock` |
-| 连不上 / 超时 | 确认同局域网、IP 正确、设备已开「待机保持 Wi-Fi」、没有别的程序占用 |
-| 日志反复报「没有发现可用设备」，但设备 IP 没变 | 设备空闲时断网休眠了，不是 IP 问题。先 `ping <设备IP>`：不通、`arp -a` 里也查不到，就是它已从 Wi-Fi 下线。到设备「设置 → 网络同步」看 Wi-Fi 是否已连、打开「联网保持」，设备回网后守护会自动接上，不用重启任何东西 |
-| 刚强杀过进程 | 等 15 秒让固件释放租约 |
-| `check` 之后紧接着 `push` 报「设备忙碌」 | 断开后约 8 秒才释放租约，隔开或重试一次（脚本已处理） |
-| 输出中文乱码 | 先 `chcp 65001`，或在 PowerShell 里 `[Console]::OutputEncoding=[Text.Encoding]::UTF8` 再重跑 |
-| 中文显示为方块 | 确认 `C:\Windows\Fonts\msyh.ttc`、`msyhbd.ttc` 存在 |
-| 设备停在旧画面 | 系统通知会临时覆盖约 12 秒；`push` 打印「已推送」即设备报告显示完成 |
-| 有任务但设备没反应 | `workbuddy-pet autostart status`：守护「未运行」就 `autostart on`；看门狗也不在就是登录项没生效（重新登录，或再跑一次 `on`） |
-| 守护和看门狗都「未运行」，日志停在某个时刻 | 多为合盖待机 / 注销后整组进程被回收，登录项不会再次触发。跑一次 `autostart on`；想长期免疫就按「守护为什么不会自己消失 → 看门狗的死角」配上 hook |
-| 结束守护后它又自己回来 | 这是看门狗在补，属正常行为；要真正停用 `workbuddy-pet autostart off` |
+| 日志反复「没有发现可用设备」，IP 没变 | 设备已从 Wi-Fi 下线：`ping <IP>` 与 `arp -a` 都查不到就确认了，去开「待机保持 Wi-Fi」 |
+| 「设备忙碌」 | 正常：守护占着连接。要手动推图先 `autostart off`，或等 8 秒重试 |
+| 守护在跑、看门狗「已停止」 | 重跑 `autostart on`；hook 触发时也会补 |
+| 升级后功能没变 | 副本被旧进程占用导致沿用旧版：`autostart off` → 覆盖 exe → `autostart on`，再比对 SHA256 |
+| PowerShell 报「意外的标记」 | 带空格/引号的路径不能当命令，用 `& "完整路径\workbuddy-pet.exe"` 或先 `cd` |
+
+## 数据与卸载
+
+设置、任务记录、日志都在 `%LOCALAPPDATA%\zectrix-workbuddy-pet\`（含 `state.json`、`watch.log`）。
+
+```powershell
+.\workbuddy-pet.exe autostart off   # 停看门狗与守护、删自启项（先停看门狗，否则它会把守护补回来）
+```
+
+再删除该目录即可完全清干净。升级保留全部设置与任务记录。
 
 ## 许可
 
-MIT。模型 / 布局 / 音效逻辑复用自 [zectrix-agent-pet](https://github.com/itopinion/zectrix-agent-pet)
-0.3.4（MIT），设备通道使用 [zectrix-local-push-sdk](https://github.com/itopinion/zectrix-local-push-sdk) 0.2.0。
+MIT。设备通道使用 [zectrix-local-push-sdk](https://github.com/itopinion/zectrix-local-push-sdk) 0.2.0（MIT）。
+本仓库不复制、不修改、不携带 SDK 与固件；固件升级请按官方指引自行操作。完整命令与细节见 [USAGE.md](USAGE.md)。
