@@ -47,20 +47,20 @@ Note 4C 不在兼容范围内。
 #### 下载即用（最快，无需编译）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.3.0-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
+`workbuddy-pet-0.3.1-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
 （约 5.4 MB），不依赖 .NET、不依赖 VC++ 运行库、不需要 Rust 工具链，也不用管 SDK 目录：
 
 ```powershell
-.\workbuddy-pet-0.3.0-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
+.\workbuddy-pet-0.3.1-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
 Start-Sleep 9                                                # 固件释放单连接约需 8 秒
-.\workbuddy-pet-0.3.0-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
-.\workbuddy-pet-0.3.0-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
+.\workbuddy-pet-0.3.1-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
+.\workbuddy-pet-0.3.1-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
 ```
 
 下载页同时给出 `SHA256SUMS.txt`，可核对文件完整性：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.3.0-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.3.1-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 二进制仍然**只是宠物程序**：它读本机 WorkBuddy 的会话数据，并直接连局域网里的 Note 4；
@@ -171,7 +171,7 @@ Start-Sleep 9                                                # 固件释放单�
 
 ```powershell
 # 下载即用
-.\workbuddy-pet-0.3.0-windows-x64.exe autostart on --target <IP>
+.\workbuddy-pet-0.3.1-windows-x64.exe autostart on --target <IP>
 # 编译安装
 .\target\release\workbuddy-pet.exe autostart on --target <IP>
 ```
@@ -286,12 +286,13 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 | --- | --- | --- |
 | WorkBuddy 未启动 | 每 5 秒看一眼进程 | 空闲 |
 | 待命（无任务） | 只读会话文件，不连接 | 空闲 |
-| 有任务（工作 / 等你处理） | 连接、推送、翻页、响铃 | 被占用 |
-| 任务结束 | 再守 5 分钟 | 期内没新任务就 `close()` 交还 |
+| 任务在跑（工作） | 连接、推送、翻页、响铃 | 被占用 |
+| 一轮答完（完成 / 等你处理） | 再守 5 分钟，看有没有新会话 | 期内占用，期满交还 |
 
 `--idle-grace 120` 可改宽限（秒），`0` 表示任务一结束就交还，值存进 `state.json`。
-「等你处理」也算活跃任务，但超过 15 分钟没有新动静会判为「状态待确认」并交还设备——
-一张被遗忘的确认卡不该把设备锁死。设备休眠导致的 `Timeout` 断开只在任务仍活跃时按
+**「等你处理」不算活跃任务**：它只代表上一轮已经答完、等用户下一条，所以宽限期一过就
+`close()` 交还设备，不会一直占着。还在跑（工作）的任务才连续占用；这类任务若静默超过
+15 分钟，按「状态待确认」同样交还。设备休眠导致的 `Timeout` 断开只在任务仍活跃时按
 15 秒步长退避重连，连续失败 5 次就停下等下一个任务，不与别的程序抢设备。
 
 ### 守护为什么不会自己消失

@@ -860,22 +860,36 @@ fn render(model: &Model, frame: usize) -> Result<Vec<u8>> {
     raster::to_png(&scene, &fonts)
 }
 
-/// 设备占用闸门：只有在「有活跃任务」期间才该占着设备，任务结束后再静默
-/// `grace` 秒就交还。墨水屏刷新贵、设备也只有一个连接，长期占着会让别的程序
-/// 和设备自己都进不了场；而只看文件、不连设备的待命几乎不花代价。
+/// 设备占用闸门：只有「确实该占着」的时候才握着这条独占连接。
+///
+/// - 有任务在跑（Working）→ 占着，它随时会换画面。
+/// - 一轮对话结束（完成 / 等你处理）→ 从最后一次活动起算，静默 `grace` 秒就交还。
+///
+/// 关键：**「等你处理」不算活跃任务**。它只代表上一轮已经答完、等用户下一条，
+/// 若按活跃处理，5 分钟宽限永远不会触发，实际要等 `stale_minutes`（15 分钟）
+/// 兜底才释放——设备会一直被占着，别的程序进不来、墨水屏也被反复刷新。
 ///
 /// 判定用「最后一个任务多久没动静」而不是内存计时器：重启、重连后依然成立，
-/// 也天然覆盖「任务在断开期间结束」的情况。超过 `stale_minutes` 没更新的任务
-/// 已经算「状态待确认」，同样不再占着设备——否则一张被遗忘的确认卡会锁死设备。
-fn may_release(model: &Model, at: i64, grace: i64) -> bool {
-    if !model.running(at).is_empty() {
-        return false;
+/// 也天然覆盖「任务在断开期间结束」的情况。超过 `stale_minutes` 没更新的
+/// Working 已经算「状态待确认」，同样不再占着设备。
+fn should_hold(model: &Model, at: i64, grace: i64) -> bool {
+    if model
+        .running(at)
+        .iter()
+        .any(|t| t.status() == Status::Working)
+    {
+        return true;
     }
     match model.tasks.iter().map(|t| t.updated_at).max() {
-        Some(last) => at.saturating_sub(last) >= grace.max(0),
-        // 一个任务都没有（比如手动 run --standby）：没有可等的，直接交还。
-        None => true,
+        Some(last) => at.saturating_sub(last) < grace.max(0),
+        // 一个任务都没有（比如手动 run --standby）：没有可等的，不必占用。
+        None => false,
     }
+}
+
+/// 是否该交还设备。与 `should_hold` 同源，避免「占用」和「释放」两处判定漂移。
+fn may_release(model: &Model, at: i64, grace: i64) -> bool {
+    !should_hold(model, at, grace)
 }
 
 /// 扫描一次会话：只有真实状态变化才落盘、打日志、响提示音。
@@ -1763,7 +1777,10 @@ async fn wait_for_task(store: &mut Store, watcher: &mut Watcher) -> Result<bool>
                     .unwrap_or_default()
             );
         }
-        if !store.model.running(now()).is_empty() {
+        // 与释放判定同源：任务在跑、或上一轮刚结束还在宽限期内才占用设备。
+        // 只看 running 会把「等你处理」也算进来，释放后立刻又被重占，
+        // 变成「连上→等 5 分钟→释放→再连上」的循环。
+        if should_hold(&store.model, now(), store.idle_grace()) {
             return Ok(true);
         }
     }
@@ -1879,7 +1896,8 @@ async fn cmd_watch(args: &Args) -> Result<()> {
                         }
                     }
                     // 拿不到设备时别硬抢：已经没有活跃任务就把设备让出来。
-                    if load_store().model.running(now()).is_empty() {
+                    let disk = load_store();
+                    if !should_hold(&disk.model, now(), grace) {
                         println!("已无活跃任务，不再重连。");
                         break;
                     }
@@ -2102,15 +2120,27 @@ mod tests {
     }
 
     #[test]
-    fn waiting_holds_the_device_but_an_abandoned_prompt_does_not_lock_it() {
-        // 「等你处理」是活跃任务：用户还没回来，必须继续占着设备提醒。
+    fn a_finished_turn_releases_after_the_grace_even_if_it_waits_for_input() {
+        // 「等你处理」= 上一轮已经答完、等用户下一条。它必须在宽限期内继续占着
+        // （用户随时可能接着问），但满 grace 就要交还：不能靠 15 分钟 stale 兜底，
+        // 否则「5 分钟没有新会话就停止占用」这条规则永远不会生效。
         let m = model_with(1, Status::Waiting, 100);
         assert!(!may_release(&m, 100, 60));
-        assert!(!may_release(&m, 800, 60));
-        // 超过 stale_minutes（默认 15 分钟）没动静 → 「状态待确认」，不再算活跃；
-        // 一张被遗忘的确认卡不能把设备锁到天荒地老。
-        assert!(may_release(&m, 2_000, 60));
-        // 一直有进展的任务同理：静默超过 15 分钟就交还。
+        assert!(!may_release(&m, 159, 60));
+        assert!(may_release(&m, 160, 60));
+        // 默认 300 秒：第 299 秒还占着，第 300 秒交还。
+        assert!(!may_release(&m, 399, 300));
+        assert!(may_release(&m, 400, 300));
+        // 释放后待命循环也不能把它重新当成「有任务」：否则会连上→等 5 分钟→
+        // 释放→再连上的死循环，比一直占着更糟。
+        assert!(!should_hold(&m, 400, 300));
+        // 同一时刻来了新消息，立刻重新占用。
+        let mut m2 = m.clone();
+        m2.apply(event(2, Status::Working), "workbuddy", 400)
+            .unwrap();
+        assert!(should_hold(&m2, 400, 300));
+
+        // 还在跑的任务不受宽限影响：一直占着（静默超过 15 分钟才算状态待确认）。
         let m = model_with(1, Status::Working, 100);
         assert!(!may_release(&m, 1_000, 60));
         assert!(may_release(&m, 1_100, 60));
