@@ -47,20 +47,20 @@ Note 4C 不在兼容范围内。
 #### 下载即用（最快，无需编译）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.2.0-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
+`workbuddy-pet-0.2.1-windows-x64.exe`，放到任意目录即可运行。它是**静态链接的单文件**
 （约 5.4 MB），不依赖 .NET、不依赖 VC++ 运行库、不需要 Rust 工具链，也不用管 SDK 目录：
 
 ```powershell
-.\workbuddy-pet-0.2.0-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
+.\workbuddy-pet-0.2.1-windows-x64.exe check  --target <IP>   # 只核对电量与信号，不推画面
 Start-Sleep 9                                                # 固件释放单连接约需 8 秒
-.\workbuddy-pet-0.2.0-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
-.\workbuddy-pet-0.2.0-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
+.\workbuddy-pet-0.2.1-windows-x64.exe push   --target <IP>   # 推一张画面确认版式
+.\workbuddy-pet-0.2.1-windows-x64.exe autostart on --target <IP>   # 开启跟随，见「二、开启跟随」
 ```
 
 下载页同时给出 `SHA256SUMS.txt`，可核对文件完整性：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.2.0-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.2.1-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 二进制仍然**只是宠物程序**：它读本机 WorkBuddy 的会话数据，并直接连局域网里的 Note 4；
@@ -171,7 +171,7 @@ Start-Sleep 9                                                # 固件释放单�
 
 ```powershell
 # 下载即用
-.\workbuddy-pet-0.2.0-windows-x64.exe autostart on --target <IP>
+.\workbuddy-pet-0.2.1-windows-x64.exe autostart on --target <IP>
 # 编译安装
 .\target\release\workbuddy-pet.exe autostart on --target <IP>
 ```
@@ -422,6 +422,7 @@ WorkBuddy 正在运行，默认忽略）。模块分工：
 | 克隆 SDK 失败（TLS / 超时） | 检查代理；可试 `git config --global http.sslBackend schannel` 后重试 |
 | `--locked` 报锁文件不一致 | 只在确实改过依赖时去掉 `--locked` 更新 `Cargo.lock` |
 | 连不上 / 超时 | 确认同局域网、IP 正确、设备已开「待机保持 Wi-Fi」、没有别的程序占用 |
+| 日志反复报「没有发现可用设备」，但设备 IP 没变 | 设备空闲时断网休眠了，不是 IP 问题。先 `ping <设备IP>`：不通、`arp -a` 里也查不到，就是它已从 Wi-Fi 下线。到设备「设置 → 网络同步」看 Wi-Fi 是否已连、打开「联网保持」，设备回网后守护会自动接上，不用重启任何东西 |
 | 刚强杀过进程 | 等 15 秒让固件释放租约 |
 | `check` 之后紧接着 `push` 报「设备忙碌」 | 断开后约 8 秒才释放租约，隔开或重试一次（脚本已处理） |
 | 输出中文乱码 | 先 `chcp 65001`，或在 PowerShell 里 `[Console]::OutputEncoding=[Text.Encoding]::UTF8` 再重跑 |

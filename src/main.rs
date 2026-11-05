@@ -507,7 +507,9 @@ fn cmd_autostart(args: &Args) -> Result<()> {
 /// 或者自启装好之后根本没重新登录，都会出现「WorkBuddy 在跑、却没人推」。
 /// 它自己也是本程序，心跳写 `watchdog.hb`，`autostart status` 与 `off` 都看这个。
 async fn cmd_supervise(_args: &Args) -> Result<()> {
-    if supervise_alive() {
+    if supervise_taken() {
+        // 已有看门狗在跑：直接退出，不打印——登录自启与手动启动会同时触发，
+        // 安静的第二次启动才不会在日志里制造「启动了两份」的错觉。
         return Ok(());
     }
     println!(
@@ -532,19 +534,45 @@ async fn cmd_supervise(_args: &Args) -> Result<()> {
     }
 }
 
+/// 看门狗自己判断「是否已有一份在跑」，也给 `ensure` 用。
+///
+/// Windows 上要求心跳新鲜**且** PID 确实是本程序：一个刚死掉的看门狗会留下
+/// 最长 20 秒的假心跳，只看心跳的话，紧接着被拉起的这一份会立刻自我否决、
+/// 直接退出，于是「谁都没在跑」。非 Windows 平台没有 PID 核验手段，
+/// 退回只看心跳，宁可漏启动一次也不重复常驻。
+fn supervise_taken() -> bool {
+    if cfg!(windows) {
+        supervise_running()
+    } else {
+        supervise_alive()
+    }
+}
+
 /// 一次性检查：守护不在就拉起。给脚本/人工用，幂等，几十毫秒结束。
 fn cmd_ensure(args: &Args) -> Result<()> {
     let verbose = args.get("verbose").is_some();
-    if guard_running() {
+    let mut started = Vec::new();
+    // 先补守护再补看门狗：守护启动时立刻落心跳，看门狗这一拍就不会再拉一份。
+    if !guard_running() {
+        start_guard()?;
+        started.push("守护");
+    }
+    // 看门狗才是兜底：它不在，守护一死就只能等下一次 hook 或登录。
+    // 以前这里只看守护，结果 hook 每次都能把守护拉回来，却永远补不上看门狗。
+    if !supervise_taken() {
+        start_supervise()?;
+        started.push("看门狗");
+    }
+    if started.is_empty() {
         if verbose {
-            println!("守护在运行，无需拉起。");
+            println!("看门狗与守护都在运行，无需拉起。");
         }
         return Ok(());
     }
-    start_guard()?;
     println!(
-        "[{}] 守护不在，已拉起",
-        chrono::Local::now().format("%H:%M:%S")
+        "[{}] 已拉起{}",
+        chrono::Local::now().format("%H:%M:%S"),
+        started.join("、")
     );
     Ok(())
 }
@@ -1695,6 +1723,22 @@ async fn wait_for_task(store: &mut Store, watcher: &mut Watcher) -> Result<bool>
 /// 设备休眠/空闲会主动断开（Timeout），这类断线按 15 秒步长退避重连，
 /// 连续失败 5 次才停（避免反复抢占设备）。ResultUnknown 不重发、不抢连接——
 /// 这条 SDK 约定只约束「同一次显示请求」，不影响断线后的重新建连。
+/// 把 SDK 的短错误翻成「现在该做什么」。守护日志是排错第一现场，
+/// 只写「没有发现可用设备」会让人以为是 IP 或网线的问题——实际最常见的是
+/// 设备空闲后断网休眠（固件 3.7.5 起尤其明显），设备端不开「联网保持」就唤不醒。
+/// 只对这两类给建议：别的错误（协议、驱动）另有原因，别误导。
+fn device_hint(e: &anyhow::Error) -> Option<&'static str> {
+    match e.downcast_ref::<zectrix_sdk::Error>() {
+        Some(zectrix_sdk::Error::NoDevice) => Some(
+            "设备不在线。IP 没变却连不上，通常是设备空闲后断网休眠：在设备「设置 → 网络同步」打开「联网保持」，或在设备上打开「连接管理端」。",
+        ),
+        Some(zectrix_sdk::Error::Busy) => {
+            Some("设备正被占用（另一份程序或设备端正在操作），约 8 秒释放，稍后自动重试。")
+        }
+        _ => None,
+    }
+}
+
 async fn cmd_watch(args: &Args) -> Result<()> {
     // 单实例：watch.cmd 会在 exe 刚退出时立刻重启，若另一份守护已经在跑，
     // 这里退出——不打印会让「为什么没动静」无从查起，所以留一行带 PID 的痕迹。
@@ -1777,6 +1821,12 @@ async fn cmd_watch(args: &Args) -> Result<()> {
                 Ok(()) => break,
                 Err(e) => {
                     eprintln!("本次会话异常结束：{e}");
+                    // 每次会话只提示一次，别让 15/30/45 秒的重连把日志刷满。
+                    if fails == 0 {
+                        if let Some(hint) = device_hint(&e) {
+                            eprintln!("　{hint}");
+                        }
+                    }
                     // 拿不到设备时别硬抢：已经没有活跃任务就把设备让出来。
                     if load_store().model.running(now()).is_empty() {
                         println!("已无活跃任务，不再重连。");
@@ -2058,6 +2108,19 @@ mod tests {
         assert_eq!(parse_heartbeat("4242\n"), None);
         assert_eq!(parse_heartbeat(""), None);
         assert_eq!(parse_heartbeat("abc\ndef\n"), None);
+    }
+
+    #[test]
+    fn device_hint_points_at_the_real_cause() {
+        // 连不上最常见的原因是设备断网休眠，提示里必须给出「联网保持」这条出路，
+        // 否则日志只有「没有发现可用设备」，用户会去查 IP 和路由器。
+        let offline: anyhow::Error = zectrix_sdk::Error::NoDevice.into();
+        assert!(device_hint(&offline).unwrap().contains("联网保持"));
+        let busy: anyhow::Error = zectrix_sdk::Error::Busy.into();
+        assert!(device_hint(&busy).unwrap().contains("8 秒"));
+        // 别的错误不硬套建议，免得把人带偏。
+        let other = anyhow::anyhow!("图像无效");
+        assert!(device_hint(&other).is_none());
     }
 
     #[test]
