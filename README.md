@@ -3,7 +3,19 @@
 把 WorkBuddy 的实时任务状态显示在 ZECTRIX Note 4 墨水屏上（400×300）。Windows 本机程序：只读本机会话文件、
 局域网直连设备，不上传数据、不写系统目录。
 
-![宠物画面：任务进行中](docs/preview.png)
+<table>
+  <tr>
+    <td align="center"><img src="docs/skin-pixel.png" width="360" alt="像素喵"><br><b>像素喵</b> <code>pixel</code>（默认）<br>针织尖帽 · 光剑与圆盾</td>
+    <td align="center"><img src="docs/skin-abacus.png" width="360" alt="金算喵"><br><b>金算喵</b> <code>abacus</code><br>连帽衫 · 算盘与账本</td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/skin-fortune.png" width="360" alt="暴富喵"><br><b>暴富喵</b> <code>fortune</code><br>机能外套 · 大耳机 · 金条</td>
+    <td align="center"><img src="docs/skin-astro.png" width="360" alt="星际喵"><br><b>星际喵</b> <code>astro</code><br>宇航服 · 头盔 · 猫爪旗</td>
+  </tr>
+</table>
+
+*四套造型共用同一套骨架与六种状态表情，只换帽子、服装与道具。图中为 `preview --demo working` 的演示数据，
+原尺寸 400×300。切换见「命令速查」——也可以直接在设备上长按上/下键。*
 
 ## ⚠️ 需要人工操作的注意事项
 
