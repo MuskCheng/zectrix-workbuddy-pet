@@ -839,16 +839,79 @@ fn cmd_voice(args: &Args) -> Result<()> {
                 println!("{line}");
             }
         }
-        "say" => {
-            let wav = args
-                .get("wav")
-                .context("用法：voice say --wav 路径 [--asr 命令]")?;
-            let cmd = args.get("asr").unwrap_or(voice::DEFAULT_ASR);
-            println!("音频：{}", voice::describe_wav(Path::new(wav))?);
-            let text = voice::transcribe(cmd, Path::new(wav))?;
-            println!("识别结果：{text}");
+        // 环境自检：转写跑不起来时先看这条，能一次说清是缺解释器、
+        // 缺脚本、还是缺模型（以及要等多久）。
+        "doctor" => {
+            let python = voice::python_exe();
+            let script = voice::worker_script()?;
+            println!(
+                "解释器：{}（{}）",
+                python.display(),
+                if python.exists() { "存在" } else { "不存在" }
+            );
+            println!("脚本：{}", script.display());
+            let started = std::time::Instant::now();
+            let mut asr = voice::Asr::spawn()?;
+            println!(
+                "模型 {} 已就绪，用时 {:.1} 秒（只在第一段音频前付一次）",
+                asr.model,
+                started.elapsed().as_secs_f32()
+            );
+            match args.get("wav") {
+                Some(wav) => {
+                    let t = std::time::Instant::now();
+                    let text = asr.transcribe(Path::new(wav))?;
+                    println!(
+                        "试转写：{:.2} 秒 → {}",
+                        t.elapsed().as_secs_f32(),
+                        if text.is_empty() { "（空）" } else { &text }
+                    );
+                }
+                None => println!("加 --wav 路径可以顺带试转一段音频"),
+            }
         }
-        other => anyhow::bail!("未知子命令 voice {other}，可用 probe / paste / say"),
+        "say" => {
+            let wav = args.get("wav").context("用法：voice say --wav 路径")?;
+            let path = Path::new(wav);
+            println!("音频：{}", voice::describe_wav(path)?);
+            let mut asr = voice::Asr::spawn()?;
+            let t = std::time::Instant::now();
+            let text = asr.transcribe(path)?;
+            println!("识别结果（{:.2} 秒）：{text}", t.elapsed().as_secs_f32());
+        }
+        // 本地渲染语音确认页，不连设备：调版式和做文档配图都用它。
+        "preview" => {
+            let text = args
+                .get("text")
+                .unwrap_or("把今天的会议纪要整理成三条要点，发到项目群里。");
+            let title = args.get("session").unwrap_or("基础固件编译");
+            let targets = vec![
+                voice::Target {
+                    session: "demo-a".into(),
+                    title: title.to_string(),
+                },
+                voice::Target {
+                    session: "demo-b".into(),
+                    title: "写周报".into(),
+                },
+            ];
+            let d = voice::Draft::new(text.to_string(), 3.2, targets, now());
+            let scene = layout::voice(&d, now());
+            let fonts = Fonts::load()?;
+            let png = raster::to_png(&scene, &fonts)?;
+            let path = args
+                .get("out")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| out_dir().join("voice.png"));
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, png)?;
+            println!("已生成：{}", path.display());
+        }
+        other => anyhow::bail!(
+            "未知子命令 voice {other}，可用 doctor / say / paste / probe / windows"
+        ),
     }
     Ok(())
 }
@@ -1133,6 +1196,110 @@ async fn push_if_changed(
     // 失败也记录签名：宁可停在旧画面，也不对同一帧反复重刷。
     *last_sig = Some(sig);
     true
+}
+
+/// 把现成的场景树推到设备（语音页、过渡页用：它们不属于 `Model` 的正常排版）。
+///
+/// 返回是否真的推了：签名相同就不推，避免对一个静态页面反复刷墨水屏。
+async fn push_scene(
+    dev: &Device,
+    scene: serde_json::Value,
+    fonts: &Fonts,
+    fmt: ImageFormat,
+    last_sig: &mut Option<String>,
+) -> bool {
+    let sig = scene.to_string();
+    if last_sig.as_ref() == Some(&sig) {
+        return false;
+    }
+    let png = match raster::to_png(&scene, fonts) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("渲染失败: {e}");
+            return false;
+        }
+    };
+    match dev.show_with_format(&png, fmt).await {
+        Ok(()) => {}
+        Err(zectrix_sdk::Error::ResultUnknown) => {
+            eprintln!("设备未确认显示结果（ResultUnknown），不重试；请在设备上目检");
+        }
+        Err(e) => eprintln!("推送失败（不重试）: {e}"),
+    }
+    *last_sig = Some(sig);
+    true
+}
+
+/// 可以投递的会话：正在跑、且有真实会话 id 的任务（去重后保持顺序）。
+///
+/// 只用 `running`：已完成/已停止的会话不该出现在「发给谁」里——语音是接着
+/// 手上的活往下说的，不是给历史记录补话。
+fn voice_targets(model: &Model, at: i64) -> Vec<voice::Target> {
+    let mut out: Vec<voice::Target> = Vec::new();
+    for t in model.running(at) {
+        if t.source != "workbuddy" || t.event.task_id.is_empty() {
+            continue;
+        }
+        if out.iter().any(|x| x.session == t.event.task_id) {
+            continue;
+        }
+        out.push(voice::Target {
+            session: t.event.task_id.clone(),
+            title: t.event.title.clone(),
+        });
+    }
+    out
+}
+
+/// 转写一段录音。首次会拉起常驻进程（要载模型，几秒），之后只付推理时间。
+///
+/// 转写失败就把进程丢掉重起：whisper 崩过一次之后，同一个进程再问也是坏的，
+/// 留着只会让后面每一段都失败。
+async fn transcribe_voice(asr: &mut Option<voice::Asr>, wav: &Path) -> Result<String> {
+    if asr.is_none() {
+        *asr = Some(tokio::task::spawn_blocking(voice::Asr::spawn).await??);
+        println!(
+            "[语音] 转写进程就绪（模型 {}）",
+            asr.as_ref().map(|w| w.model.as_str()).unwrap_or("?")
+        );
+    }
+    let mut worker = asr.take().expect("上面刚补上");
+    let path = wav.to_path_buf();
+    let (worker, result) = tokio::task::spawn_blocking(move || {
+        let r = worker.transcribe(&path);
+        (worker, r)
+    })
+    .await?;
+    match result {
+        Ok(text) => {
+            *asr = Some(worker);
+            Ok(text)
+        }
+        Err(e) => {
+            drop(worker);
+            Err(e)
+        }
+    }
+}
+
+/// 把草稿投进目标会话的输入框。只粘贴、不回车——识别错字还有机会在电脑上改。
+async fn deliver_voice(draft: voice::Draft) -> Result<String> {
+    let text = draft.text.clone();
+    let target = draft.target().cloned();
+    let what = match &target {
+        Some(t) => format!("已粘贴到「{}」的输入框（未发送）", t.title),
+        None => "已粘贴到当前输入框（未发送）".to_string(),
+    };
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        if let Some(t) = target {
+            voice::open_session(&t.session)?;
+            // 深链切会话要时间：窗口起来、组件重建完再粘贴，否则粘到上一个会话里。
+            std::thread::sleep(Duration::from_millis(800));
+        }
+        voice::deliver(&text, false)
+    })
+    .await??;
+    Ok(what)
 }
 
 fn describe(model: &Model) -> String {
@@ -1621,31 +1788,6 @@ async fn cmd_push(args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn write_wav(path: &Path, samples: &[i16], rate: u32) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let data_len = (samples.len() * 2) as u32;
-    let mut bytes = Vec::with_capacity(samples.len() * 2 + 44);
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(data_len + 36).to_le_bytes());
-    bytes.extend_from_slice(b"WAVEfmt ");
-    bytes.extend_from_slice(&16u32.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&rate.to_le_bytes());
-    bytes.extend_from_slice(&(rate * 2).to_le_bytes());
-    bytes.extend_from_slice(&2u16.to_le_bytes());
-    bytes.extend_from_slice(&16u16.to_le_bytes());
-    bytes.extend_from_slice(b"data");
-    bytes.extend_from_slice(&data_len.to_le_bytes());
-    for s in samples {
-        bytes.extend_from_slice(&s.to_le_bytes());
-    }
-    std::fs::write(path, bytes)?;
-    Ok(())
-}
-
 /// 本次连接建立的时刻。刚连上时音频通路可能还没就绪，立刻播放会「咔」一声
 /// （实测重连后紧跟着的第一声尤其明显），先让链路安静几秒再响。
 static CONNECTED_AT: AtomicI64 = AtomicI64::new(0);
@@ -1753,6 +1895,13 @@ async fn cmd_run(args: &Args) -> Result<()> {
         .unwrap_or_else(|| store.idle_grace());
     let mut frame = 0usize;
     let mut last_sig: Option<String> = None;
+    // 语音投递：录音只能由设备发起、且必须持有连接，所以它天然只在「设备已被
+    // 占用」时可用——不常驻、不额外抢设备，任务结束就随连接一起消失。
+    let mut asr: Option<voice::Asr> = None;
+    let mut draft: Option<voice::Draft> = None;
+    // 设备正在录音时固件占着采集，推送和响铃都会拿到 Busy——这一拍直接跳过，
+    // 等 RecordingFinished 再恢复，别让日志里刷一串「推送失败」。
+    let mut recording = false;
     let mut scan_tick = tokio::time::interval(Duration::from_secs(2));
     scan_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -1780,9 +1929,26 @@ async fn cmd_run(args: &Args) -> Result<()> {
                     println!("WorkBuddy 已退出：正常断开设备，回到待命。");
                     break Ok(());
                 }
+                // 录音期间设备在采集，任何推送都会 Busy：这一拍什么都不做。
+                if recording {
+                    continue;
+                }
+                // 语音草稿到点就丢：设备不在手边时不能一直占着屏幕，
+                // 也不该让它把设备一直锁在这里。
+                if draft.as_ref().is_some_and(|d| now() >= d.expires_at) {
+                    println!("[语音] {} 秒内没确认，丢弃这段识别结果", voice::PREVIEW_SECS);
+                    draft = None;
+                    // 清掉签名，下面这一拍就会把主界面重新推回去。
+                    last_sig = None;
+                }
                 // 交还设备的判定放在扫描之前：判定用上一拍的状态，
                 // grace 以秒计，差一拍不影响，却让「跟随已关闭」时也能正常释放。
-                if standby && may_release(&model, now(), grace) && !session_writing(&model) {
+                // 草稿还在等确认时先别撒手：一释放，用户就按不出「确认」了。
+                if standby
+                    && draft.is_none()
+                    && may_release(&model, now(), grace)
+                    && !session_writing(&model)
+                {
                     println!("任务已结束（{grace} 秒内没有活跃任务）：释放设备，回到待命。");
                     // 记下交还时刻：外层重新待命后，冷却期内不再立刻抢回来。
                     store.released_at = Some(now());
@@ -1793,6 +1959,7 @@ async fn cmd_run(args: &Args) -> Result<()> {
                     continue;
                 }
                 if scan_and_report(&mut model, &mut watcher, &mut store, &dev, true).await
+                    && draft.is_none()
                     && push_if_changed(&dev, &mut model, &mut store, &fonts, fmt, frame, &mut last_sig)
                         .await
                 {
@@ -1803,6 +1970,72 @@ async fn cmd_run(args: &Args) -> Result<()> {
                 match event {
                     Ok(Some(zectrix_sdk::Event::Key { key, action })) => {
                         println!("[按键] {key:?} {action:?}");
+                        // 语音草稿优先吃三个短按：这时上下键是「投给谁」，
+                        // 确认键是「粘贴」，都不能再执行主页面的含义。
+                        if let Some(mut d) = draft.take() {
+                            let taken = matches!(
+                                (key, action),
+                                (zectrix_sdk::Key::Up, zectrix_sdk::KeyAction::Short)
+                                    | (zectrix_sdk::Key::Down, zectrix_sdk::KeyAction::Short)
+                                    | (zectrix_sdk::Key::Confirm, zectrix_sdk::KeyAction::Short)
+                            );
+                            if taken {
+                                match (key, action) {
+                                    (zectrix_sdk::Key::Up, _) => {
+                                        d.cycle(-1);
+                                        draft = Some(d);
+                                    }
+                                    (zectrix_sdk::Key::Down, _) => {
+                                        d.cycle(1);
+                                        draft = Some(d);
+                                    }
+                                    _ => {
+                                        if d.text.trim().is_empty() {
+                                            println!("[语音] 没有可用文字，丢弃");
+                                            last_sig = None;
+                                        } else {
+                                            match deliver_voice(d.clone()).await {
+                                                Ok(what) => {
+                                                    println!("[语音] {what}");
+                                                    last_sig = None;
+                                                }
+                                                Err(e) => {
+                                                    // 失败不丢文本：多半是窗口没在前台、
+                                                    // 剪贴板被占这类一次性问题，再按一次就行。
+                                                    eprintln!("[语音] 投递失败: {e}");
+                                                    d.hint = Some(format!("投递失败：{e}"));
+                                                    d.expires_at = now() + voice::PREVIEW_SECS;
+                                                    draft = Some(d);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(d) = draft.as_ref() {
+                                    let scene = layout::voice(d, now());
+                                    push_scene(&dev, scene, &fonts, fmt, &mut last_sig).await;
+                                } else if draft.is_none() {
+                                    // 投递成功或丢弃：立刻把主界面推回去，不等下一次扫描。
+                                    if push_if_changed(
+                                        &dev,
+                                        &mut model,
+                                        &mut store,
+                                        &fonts,
+                                        fmt,
+                                        frame,
+                                        &mut last_sig,
+                                    )
+                                    .await
+                                    {
+                                        frame = (frame + 1) % 6;
+                                    }
+                                }
+                                continue;
+                            }
+                            // 长按换造型之类的其它手势：收起草稿，按键照常处理。
+                            println!("[语音] 收起草稿，按键交给常规操作");
+                            last_sig = None;
+                        }
                         // 短按翻任务、长按换造型：两个手势各占一个，互不抢。
                         // 设备只上报「上下短按」「上下长按」「确认短按」三种
                         // （确认长按被固件的录音流程消费），所以能用的组合正好够。
@@ -1850,20 +2083,93 @@ async fn cmd_run(args: &Args) -> Result<()> {
                             frame = (frame + 1) % 6;
                         }
                     }
+                    Ok(Some(zectrix_sdk::Event::RecordingStarted)) => {
+                        // 长按确认键：固件进入录音，设备自己显示「正在聆听」。
+                        // 主机侧什么都不用推，只需要知道「现在别碰设备」。
+                        recording = true;
+                        println!("[语音] 开始录音（松开确认键结束）");
+                    }
                     Ok(Some(zectrix_sdk::Event::RecordingFinished { audio, reason })) => {
-                        if let Some(clip) = audio {
-                            let name = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-                            let path = out_dir().join("recordings").join(format!("{name}.wav"));
-                            match write_wav(&path, &clip.samples, 16_000) {
-                                Ok(()) => println!("录音已保存（{reason:?}）：{}", path.display()),
-                                Err(e) => eprintln!("录音保存失败: {e}"),
+                        recording = false;
+                        // 松手即到：设备侧的录音条已经收起，屏幕现在是空的。
+                        // 这里必须一路走完「落盘 → 转写 → 给用户看」，中间不能
+                        // 把设备晾在那儿——用户刚说完话，正等着看它听成了什么。
+                        let pcm = audio.map(|a| a.samples).unwrap_or_default();
+                        let seconds = pcm.len() as f32 / 16_000.0;
+                        if seconds < 0.4 {
+                            // 误触确认键：固件也会给一个空/极短的录音，别当命令处理。
+                            println!("[语音] 录音 {seconds:.1} 秒（{reason:?}），太短，忽略");
+                            continue;
+                        }
+                        let clip = match voice::save_wav(&out_dir().join("recordings"), &pcm) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                eprintln!("录音保存失败: {e}");
+                                continue;
+                            }
+                        };
+                        println!(
+                            "[语音] 录音 {:.1} 秒 → {}（{reason:?}）",
+                            clip.seconds,
+                            clip.path.display()
+                        );
+                        let scene = layout::voice_note(
+                            "正在识别…",
+                            "松手后在本机转写，音频不上传云端",
+                            2,
+                        );
+                        push_scene(&dev, scene, &fonts, fmt, &mut last_sig).await;
+                        // 首次要载模型（几秒），之后每段只剩推理时间。
+                        match transcribe_voice(&mut asr, &clip.path).await {
+                            Ok(text) if text.trim().is_empty() => {
+                                println!("[语音] 识别结果为空");
+                                let scene =
+                                    layout::voice_note("没听清", "靠近设备再说一次，或直接打字", 0);
+                                push_scene(&dev, scene, &fonts, fmt, &mut last_sig).await;
+                            }
+                            Ok(text) => {
+                                let targets = voice_targets(&model, now());
+                                let mut d = voice::Draft::new(
+                                    text,
+                                    clip.seconds,
+                                    targets,
+                                    now(),
+                                );
+                                // 默认选中屏幕上正在显示的那个会话：多数时候
+                                // 用户就是对着当前这轮在说话。
+                                if let Some(cur) = model.current(now()) {
+                                    if let Some(i) = d
+                                        .targets
+                                        .iter()
+                                        .position(|t| t.session == cur.event.task_id)
+                                    {
+                                        d.index = i;
+                                    }
+                                }
+                                println!(
+                                    "[语音] 识别完成（{} 字，{} 个会话可选）：{}",
+                                    d.text.chars().count(),
+                                    d.targets.len(),
+                                    d.text
+                                );
+                                let scene = layout::voice(&d, now());
+                                push_scene(&dev, scene, &fonts, fmt, &mut last_sig).await;
+                                draft = Some(d);
+                            }
+                            Err(e) => {
+                                eprintln!("[语音] 转写失败: {e}");
+                                let scene = layout::voice_note(
+                                    "转写失败",
+                                    &format!("{e}（先说一次短句试试）"),
+                                    0,
+                                );
+                                push_scene(&dev, scene, &fonts, fmt, &mut last_sig).await;
                             }
                         }
                     }
                     Ok(Some(zectrix_sdk::Event::Disconnected { reason })) => {
                         break Err(anyhow::anyhow!("设备连接已结束（{reason:?}），按约定不自动重连"));
                     }
-                    Ok(Some(_)) => {}
                     Ok(None) => break Err(anyhow::anyhow!("连接已终止，按约定不自动重连")),
                     Err(e) => break Err(anyhow::anyhow!("事件通道结束: {e}")),
                 }

@@ -33,6 +33,16 @@
    固件 3.7.5（`zectrix-sdk` 0.2.0 配套），3.7.2 实测可连。不需要管理员权限、不需要极趣云 API Key。
 7. **升级要先停再换**：`autostart off` → 覆盖 exe → `autostart on`。直接 `autostart on` 也会尝试热替换，
    但旧进程仍占用副本文件时会**静默沿用旧版**，看起来升级成功其实没换。
+8. **语音输入要自己装 Python（可选）**：设备录音只是音频，转文字发生在本机，
+   需要 Python 3.12 + `openai-whisper`。不装也能正常用，只是长按确认键录音后转不出字。
+   一次性装好（GPU 版 torch 约 2 GB，CPU 版慢 3～5 倍）：
+   ```powershell
+   winget install --id Python.Python.3.12 -e
+   & "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m pip install torch --index-url https://download.pytorch.org/whl/cu121
+   & "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m pip install openai-whisper
+   .\workbuddy-pet.exe voice doctor      # 应打印「模型 small 已就绪」
+   ```
+   首次录音前要多等 5～6 秒（载模型），之后每段 1 秒内出字。
 
 ## 部署步骤
 
@@ -133,11 +143,17 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 | `preview [--demo <状态>] [--out 路径]` | 本地渲染 PNG，不连设备 |
 | `autostart on [--target <IP>]` / `off` / `status` | 开启 / 关闭跟随、查看状态 |
 | `skin list` / `skin set <id>` / `skin current` | 换造型（见下） |
+| `voice doctor [--wav 路径]` | 检查语音转写环境，可顺带试转一段音频 |
 | `sessions` | 列出可跟随的会话及推导状态（诊断） |
 | `run [--target <IP>]` / `watch` / `supervise` | 调试用：常驻推图 / 守护 / 看门狗 |
 
 **设备按键**（设备连着时有效）：短按上/下翻任务，短按确认回首页，**长按上/下换造型**（四只循环，立即存盘）。
 任务交还设备后按键到不了程序，属正常。
+
+**语音输入**（设备被占用时，即任务在跑）：**长按确认键**说话，松手结束 → 设备显示识别文本和「投给哪个会话」。
+此时短按上/下换会话、短按确认把文字**粘贴**到该会话输入框（不发送，回去自己改错字），20 秒不操作自动丢弃。
+
+<img src="docs/voice.png" width="360" alt="语音投递确认页">
 
 **造型**：`pixel` 像素喵（默认）｜`abacus` 金算喵｜`fortune` 暴富喵｜`astro` 星际喵。
 `skin set` 写进 `state.json`，守护下一帧生效，不用重启。也可以用 `--skin` 临时试看不落盘。

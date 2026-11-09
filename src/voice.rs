@@ -30,6 +30,60 @@ pub struct Clip {
     pub peak: u16,
 }
 
+/// 一次语音投递的候选会话。`session` 用来拼深链，`title` 只上屏。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub session: String,
+    pub title: String,
+}
+
+/// 「识别完了，等你决定投给谁」的草稿。
+///
+/// 只在**设备被占用**（有任务在跑）时才会出现：录音由设备发起，松手就把音频
+/// 交给主机，主机转成文字后先给用户看一眼，确认才粘贴——识别错字还有机会
+/// 拦下来，不会一松手就往对话里塞一段错话。
+#[derive(Clone, Debug)]
+pub struct Draft {
+    pub text: String,
+    /// 录音时长（秒），用来给「这段听清了没有」一个可核对的依据。
+    pub seconds: f32,
+    pub targets: Vec<Target>,
+    /// 当前选中的目标下标。
+    pub index: usize,
+    /// 到点自动丢弃：设备不在手边时不至于一直占着屏幕。
+    pub expires_at: i64,
+    /// 上次投递失败的原因。留着文本让人可以直接再按一次，不用重新说一遍。
+    pub hint: Option<String>,
+}
+
+impl Draft {
+    pub fn new(text: String, seconds: f32, targets: Vec<Target>, now: i64) -> Self {
+        Self {
+            text,
+            seconds,
+            targets,
+            index: 0,
+            expires_at: now + PREVIEW_SECS,
+            hint: None,
+        }
+    }
+    pub fn target(&self) -> Option<&Target> {
+        self.targets.get(self.index)
+    }
+    /// 上下键换目标。只有一个会话时保持在原位，不绕圈。
+    pub fn cycle(&mut self, step: i32) {
+        let n = self.targets.len();
+        if n < 2 {
+            return;
+        }
+        let next = self.index as i64 + i64::from(step);
+        self.index = next.rem_euclid(n as i64) as usize;
+    }
+}
+
+/// 识别结果在屏幕上停留多久（秒）。
+pub const PREVIEW_SECS: i64 = 20;
+
 /// 把 SDK 给的 PCM 写成 16 kHz 单声道 WAV，返回路径、时长与峰值。
 pub fn save_wav(dir: &Path, pcm: &[i16]) -> Result<Clip> {
     std::fs::create_dir_all(dir).with_context(|| format!("建目录失败：{}", dir.display()))?;
@@ -74,31 +128,176 @@ pub fn describe_wav(path: &Path) -> Result<String> {
     Ok(format!("{rate} Hz / {channels} 声道 / {bits} bit / {secs:.2} 秒"))
 }
 
-/// 转写命令的默认值。`{wav}` 会被替换成音频路径，识别结果取 stdout。
-///
-/// 本机已有 openai-whisper + tiny/base/small/medium 四个模型（`~/.cache/whisper`），
-/// 但**Python 3.12 解释器已被卸载**（只剩 `Lib`/`Scripts`，没有 python.exe），
-/// 所以默认命令当前跑不起来——这属于环境问题，不是模型问题。
-pub const DEFAULT_ASR: &str = "whisper {wav} --model small --language zh --output_format txt --output_dir - --fp16 False";
+/// 默认模型。small 在 4 GB 显存的 3050 Ti 上跑 10 秒语音约 0.6 秒，
+/// 中文准确率够日常指令；想更准可以换成 medium（慢 2～3 倍）。
+pub const DEFAULT_MODEL: &str = "small";
 
-/// 跑一次转写。`cmd` 里必须含 `{wav}`；stdout 即文本。
-pub fn transcribe(cmd: &str, wav: &Path) -> Result<String> {
-    if !cmd.contains("{wav}") {
-        anyhow::bail!("转写命令里缺少 {{wav}} 占位符：{cmd}");
+/// 常驻转写进程：加载一次模型，之后每段音频只花推理时间。
+///
+/// 和 `transcribe`（一次性命令）的区别只在等待时间：一次性命令每次要重新
+/// import torch 并载模型，实测 6～8 秒；常驻进程 0.5～2 秒。语音是「松手就要
+/// 看见字」的交互，这个差别决定了功能能不能用。
+pub struct Asr {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    lines: std::sync::mpsc::Receiver<String>,
+    pub model: String,
+}
+
+impl Asr {
+    /// 起一个常驻转写进程，等到它把模型加载完（`ready`）才返回。
+    pub fn spawn() -> Result<Self> {
+        Self::spawn_with(&python_exe(), &worker_script()?, DEFAULT_MODEL)
     }
-    let line = cmd.replace("{wav}", &format!("\"{}\"", wav.display()));
-    let out = std::process::Command::new("cmd")
-        .args(["/C", &line])
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .context("启动转写命令失败")?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !out.status.success() && text.is_empty() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("转写失败：{}", err.lines().last().unwrap_or("未知错误"));
+
+    pub fn spawn_with(python: &Path, script: &Path, model: &str) -> Result<Self> {
+        use std::io::{BufRead, BufReader};
+        let mut cmd = std::process::Command::new(python);
+        cmd.arg(script)
+            .arg(model)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            // 模型加载进度、torch 警告都走 stderr；吞掉，不占日志也不弹窗。
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NO_WINDOW：守护进程是无窗口的，别在用户桌面闪一个黑框。
+            cmd.creation_flags(0x0800_0000);
+        }
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("启动转写进程失败：{}", python.display()))?;
+        let stdin = child.stdin.take().context("转写进程没有 stdin")?;
+        let stdout = child.stdout.take().context("转写进程没有 stdout")?;
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let asr = Self {            child,
+            stdin,
+            lines,
+            model: model.to_string(),
+        };
+        // 首次要载模型（small 约 1～3 秒，含 import torch 更久），给足时间。
+        match asr.next_json(std::time::Duration::from_secs(120)) {
+            Ok(v) if v["ready"].as_bool() == Some(true) => Ok(asr),
+            Ok(v) => anyhow::bail!(
+                "{}",
+                v["error"].as_str().unwrap_or("转写进程启动异常")
+            ),
+            Err(e) => anyhow::bail!("转写进程没就绪：{e}"),
+        }
     }
-    Ok(text)
+
+    fn next_json(&self, wait: std::time::Duration) -> Result<serde_json::Value> {
+        let line = self
+            .lines
+            .recv_timeout(wait)
+            .map_err(|_| anyhow::anyhow!("等了 {} 秒没有响应", wait.as_secs()))?;
+        serde_json::from_str(&line).with_context(|| format!("转写进程输出不是 JSON：{line}"))
+    }
+
+    /// 转写一段 WAV。阻塞调用，调用方要放到 `spawn_blocking` 里。
+    pub fn transcribe(&mut self, wav: &Path) -> Result<String> {
+        use std::io::Write;
+        writeln!(self.stdin, "{}", wav.display()).context("把音频路径写给转写进程失败")?;
+        self.stdin.flush().context("转写请求没有送达")?;
+        let v = self.next_json(std::time::Duration::from_secs(180))?;
+        if let Some(err) = v["error"].as_str() {
+            anyhow::bail!("{err}");
+        }
+        Ok(v["text"].as_str().unwrap_or("").trim().to_string())
+    }
+}
+
+impl Drop for Asr {
+    fn drop(&mut self) {
+        use std::io::Write;
+        let _ = writeln!(self.stdin, "__quit__");
+        let _ = self.stdin.flush();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Python 解释器：优先显式环境变量，其次 python.org 的默认安装位置。
+///
+/// 不能用 PATH 里的 `python` 兜底就完事——WorkBuddy 自带的 3.13 也在 PATH 里，
+/// 但 torch/whisper 装在 3.12 的 user site 下，走错解释器会报「没有 whisper」。
+pub fn python_exe() -> PathBuf {
+    if let Ok(p) = std::env::var("WORKBUDDY_PET_PYTHON") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    let mut candidates = Vec::new();
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(&local).join(r"Programs\Python\Python312\python.exe"),
+        );
+    }
+    candidates.push(PathBuf::from(r"C:\Python312\python.exe"));
+    candidates.push(PathBuf::from(r"C:\Program Files\Python312\python.exe"));
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("python"))
+}
+
+/// `asr_worker.py` 的位置：显式路径 → 程序同目录 → 仓库 scripts/ → 释放内置副本。
+///
+/// 最后一档是为了「只有一个 exe」的分发形态：脚本编进二进制，第一次用到时
+/// 写到数据目录。这样下载单文件的人不用再找配套文件，而想改脚本的人把它放到
+/// exe 同目录就能覆盖。
+pub fn worker_script() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("WORKBUDDY_PET_ASR_SCRIPT") {
+        if !p.is_empty() {
+            return Ok(PathBuf::from(p));
+        }
+    }
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // 放在 exe 旁边的那份优先：想临时改脚本不用重新编译。
+            candidates.push(dir.join("asr_worker.py"));
+        }
+    }
+    if let Some(path) = candidates.into_iter().find(|p| p.exists()) {
+        return Ok(path);
+    }
+    // 其次是编进二进制的那份（升级后自动同步成新版）。
+    if let Some(path) = embedded_script() {
+        return Ok(path);
+    }
+    // 最后才是仓库里的源文件：只用于 `cargo run` 这种没写数据目录的场景。
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(r"scripts\asr_worker.py");
+    if dev.exists() {
+        return Ok(dev);
+    }
+    anyhow::bail!("找不到也放不出 asr_worker.py（数据目录不可写？）")
+}
+
+/// 编进二进制的那份脚本。
+const WORKER_SOURCE: &str = include_str!("../scripts/asr_worker.py");
+
+/// 把内置脚本写到数据目录，内容不同才写（升级后自动换成新版）。
+fn embedded_script() -> Option<PathBuf> {
+    let base = std::env::var("LOCALAPPDATA").ok()?;
+    let path = PathBuf::from(base)
+        .join("zectrix-workbuddy-pet")
+        .join("asr_worker.py");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(WORKER_SOURCE) {
+        std::fs::write(&path, WORKER_SOURCE).ok()?;
+    }
+    Some(path)
 }
 
 /// 把文本送进 WorkBuddy 输入框；`send` 为真时再按一次回车。
@@ -443,11 +642,5 @@ mod tests {
         assert!(info.contains("1 声道"), "{info}");
         assert!(info.contains("16 bit"), "{info}");
         assert_eq!(clip.peak, 32767);
-    }
-
-    #[test]
-    fn transcribe_requires_placeholder() {
-        let err = transcribe("whisper no-placeholder", Path::new("x.wav")).unwrap_err();
-        assert!(err.to_string().contains("{wav}"), "{err}");
     }
 }
