@@ -880,21 +880,22 @@ fn cmd_voice(args: &Args) -> Result<()> {
             println!("识别结果（{:.2} 秒）：{text}", t.elapsed().as_secs_f32());
         }
         // 本地渲染语音确认页，不连设备：调版式和做文档配图都用它。
+        // 默认按日常形态渲染（一个会话），`--two` 才出多会话切换的样子。
         "preview" => {
             let text = args
                 .get("text")
                 .unwrap_or("把今天的会议纪要整理成三条要点，发到项目群里。");
-            let title = args.get("session").unwrap_or("基础固件编译");
-            let targets = vec![
-                voice::Target {
-                    session: "demo-a".into(),
-                    title: title.to_string(),
-                },
-                voice::Target {
+            let title = args.get("session").unwrap_or("WorkBuddy 宠物");
+            let mut targets = vec![voice::Target {
+                session: "demo-a".into(),
+                title: title.to_string(),
+            }];
+            if args.has("two") {
+                targets.push(voice::Target {
                     session: "demo-b".into(),
                     title: "写周报".into(),
-                },
-            ];
+                });
+            }
             let d = voice::Draft::new(text.to_string(), 3.2, targets, now());
             let scene = layout::voice(&d, now());
             let fonts = Fonts::load()?;
@@ -1232,21 +1233,34 @@ async fn push_scene(
 
 /// 可以投递的会话：正在跑、且有真实会话 id 的任务（去重后保持顺序）。
 ///
-/// 只用 `running`：已完成/已停止的会话不该出现在「发给谁」里——语音是接着
-/// 手上的活往下说的，不是给历史记录补话。
+/// 优先 `running`（工作 / 等待确认）。但要留一个退路：**一轮刚答完**时用户
+/// 常常立刻补一句，此刻任务已经是「完成」，`running` 为空，确认页就只能写
+/// 「→ 当前窗口」——屏幕上看不到会话名，人会以为投错了。所以没有活跃任务时
+/// 退到最近还有效（未陈旧）的会话，最多 3 个。历史记录仍然不会混进来。
 fn voice_targets(model: &Model, at: i64) -> Vec<voice::Target> {
     let mut out: Vec<voice::Target> = Vec::new();
-    for t in model.running(at) {
+    let mut push = |t: &Task| {
         if t.source != "workbuddy" || t.event.task_id.is_empty() {
-            continue;
+            return;
         }
         if out.iter().any(|x| x.session == t.event.task_id) {
-            continue;
+            return;
         }
         out.push(voice::Target {
             session: t.event.task_id.clone(),
             title: t.event.title.clone(),
         });
+    };
+    let running = model.running(at);
+    if running.is_empty() {
+        // `live()` 已按最近活动倒序，取前 3 条足够覆盖「同时开着几个会话」。
+        for t in model.live(at).iter().filter(|t| !t.stale).take(3) {
+            push(t);
+        }
+    } else {
+        for t in &running {
+            push(t);
+        }
     }
     out
 }
@@ -2636,6 +2650,22 @@ mod tests {
         m.settings.follow_enabled = true;
         m.apply(event(seq, status), "workbuddy", at).unwrap();
         m
+    }
+
+    /// 一轮刚答完时用户常马上补一句：此刻没有「正在跑」的会话，也必须能
+    /// 指出投给谁，不能只剩一句「当前窗口」让人猜。
+    #[test]
+    fn voice_targets_fall_back_to_the_session_that_just_finished() {
+        let m = model_with(1, Status::Done, 1_000);
+        let targets = voice_targets(&m, 1_010);
+        assert_eq!(targets.len(), 1, "刚完成的会话要能作为投递目标");
+        assert_eq!(targets[0].session, "t1");
+        assert_eq!(targets[0].title, "真实任务");
+
+        // 超过 stale_minutes 的会话不再列：语音是接着手上的活说的，
+        // 不是给几天前的记录补话。
+        let stale_at = 1_000 + m.settings.stale_minutes as i64 * 60 + 5;
+        assert!(voice_targets(&m, stale_at).is_empty());
     }
 
     #[test]
