@@ -840,6 +840,17 @@ fn cmd_voice(args: &Args) -> Result<()> {
             }
         }
         "focus" => println!("{}", voice::focus_probe()?),
+        // 诊断：屏幕上「↑↓ 换会话」到底能换到哪些会话，顺序是否和预期一致。
+        "targets" => {
+            let store = load_store();
+            let list = voice_targets(&store.model, now());
+            if list.is_empty() {
+                println!("没有可投递的会话（会直接贴到当前输入框）");
+            }
+            for (i, t) in list.iter().enumerate() {
+                println!("{:>2}. {}  [{}]", i + 1, t.title, t.session);
+            }
+        }
         // 环境自检：转写跑不起来时先看这条，能一次说清是缺解释器、
         // 缺脚本、还是缺模型（以及要等多久）。
         "doctor" => {
@@ -1232,38 +1243,47 @@ async fn push_scene(
     true
 }
 
-/// 可以投递的会话：正在跑、且有真实会话 id 的任务（去重后保持顺序）。
+/// 可以投递的会话：正在跑/等确认的排前面，其余按最近活动补到最多 8 个。
 ///
-/// 优先 `running`（工作 / 等待确认）。但要留一个退路：**一轮刚答完**时用户
-/// 常常立刻补一句，此刻任务已经是「完成」，`running` 为空，确认页就只能写
-/// 「→ 当前窗口」——屏幕上看不到会话名，人会以为投错了。所以没有活跃任务时
-/// 退到最近还有效（未陈旧）的会话，最多 3 个。历史记录仍然不会混进来。
+/// **id 用 `thread_id`（基础会话 UUID），不是 `task_id`**：task_id 带轮次后缀
+/// （`…-u1794204456`），而深链 `workbuddy://chat/<id>` 只认基础 id。之前用
+/// task_id，选「别的会话」时其实切不过去，文字会落回原来那个会话里。
+///
+/// 候选范围是「Watcher 扫得到的会话」（最近 12 小时有活动）：包括已经答完的。
+/// 语音是在接着手上的活说，但用户明确要投给另一个会话时，那个会话多半刚用过。
 fn voice_targets(model: &Model, at: i64) -> Vec<voice::Target> {
+    const MAX: usize = 8;
     let mut out: Vec<voice::Target> = Vec::new();
-    let mut push = |t: &Task| {
-        if t.source != "workbuddy" || t.event.task_id.is_empty() {
-            return;
-        }
-        if out.iter().any(|x| x.session == t.event.task_id) {
-            return;
-        }
-        out.push(voice::Target {
-            session: t.event.task_id.clone(),
-            title: t.event.title.clone(),
-        });
-    };
-    let running = model.running(at);
-    if running.is_empty() {
-        // `live()` 已按最近活动倒序，取前 3 条足够覆盖「同时开着几个会话」。
-        for t in model.live(at).iter().filter(|t| !t.stale).take(3) {
-            push(t);
-        }
-    } else {
-        for t in &running {
-            push(t);
-        }
+    // 先放正在跑的：它们是「顺手补一句」最可能的目标，排在前面不用按键找。
+    for t in model.running(at) {
+        push_target(&mut out, &t);
     }
+    for t in model.live(at) {
+        if out.len() >= MAX {
+            break;
+        }
+        push_target(&mut out, &t);
+    }
+    out.truncate(MAX);
     out
+}
+
+fn push_target(out: &mut Vec<voice::Target>, t: &Task) {
+    if t.source != "workbuddy" {
+        return;
+    }
+    let id = t
+        .event
+        .thread_id
+        .clone()
+        .unwrap_or_else(|| t.event.task_id.clone());
+    if id.is_empty() || out.iter().any(|x| x.session == id) {
+        return;
+    }
+    out.push(voice::Target {
+        session: id,
+        title: t.event.title.clone(),
+    });
 }
 
 /// 转写一段录音。首次会拉起常驻进程（要载模型，几秒），之后只付推理时间。
@@ -1315,7 +1335,8 @@ async fn deliver_voice(draft: voice::Draft) -> Result<String> {
         if let Some(t) = target.filter(|_| need_switch) {
             voice::open_session(&t.session)?;
             // 深链切会话要时间：窗口起来、组件重建完再粘贴，否则粘到上一个会话里。
-            std::thread::sleep(Duration::from_millis(800));
+            // 实测 800ms 偶尔不够（会话多、列表在滚动），给到 1.2 秒。
+            std::thread::sleep(Duration::from_millis(1200));
         }
         voice::deliver(&text, false)
     })
@@ -2157,13 +2178,17 @@ async fn cmd_run(args: &Args) -> Result<()> {
                                     now(),
                                 );
                                 // 默认选中屏幕上正在显示的那个会话：多数时候
-                                // 用户就是对着当前这轮在说话。
+                                // 用户就是对着当前这轮在说话。id 必须用
+                                // thread_id（基础 UUID）——它才是深链认的 id。
                                 if let Some(cur) = model.current(now()) {
-                                    d.current = Some(cur.event.task_id.clone());
-                                    if let Some(i) = d
-                                        .targets
-                                        .iter()
-                                        .position(|t| t.session == cur.event.task_id)
+                                    let cur_id = cur
+                                        .event
+                                        .thread_id
+                                        .clone()
+                                        .unwrap_or_else(|| cur.event.task_id.clone());
+                                    d.current = Some(cur_id.clone());
+                                    if let Some(i) =
+                                        d.targets.iter().position(|t| t.session == cur_id)
                                     {
                                         d.index = i;
                                     }
@@ -2663,10 +2688,50 @@ mod tests {
         assert_eq!(targets[0].session, "t1");
         assert_eq!(targets[0].title, "真实任务");
 
-        // 超过 stale_minutes 的会话不再列：语音是接着手上的活说的，
-        // 不是给几天前的记录补话。
+        // 超过 stale_minutes 也还在候选里：用户可能就是想投给刚放下的那个会话。
+        // 真正的边界是 Watcher 的 12 小时扫描窗口，不是 15 分钟陈旧标记。
         let stale_at = 1_000 + m.settings.stale_minutes as i64 * 60 + 5;
-        assert!(voice_targets(&m, stale_at).is_empty());
+        assert_eq!(voice_targets(&m, stale_at).len(), 1);
+    }
+
+    /// 会话 id 必须是基础 UUID，且「别的会话」也要能选——录音不是只能投给
+    /// 正在跑的那一个。
+    #[test]
+    fn voice_targets_use_base_session_id_and_cover_other_chats() {
+        let mk = |task: &str, thread: &str, seq: u64, status: Status| TaskEvent {
+            task_id: task.into(),
+            thread_id: Some(thread.into()),
+            seq,
+            status,
+            title: thread.into(),
+            detail: String::new(),
+            progress: None,
+            progress_source: ProgressSource::Agent,
+            progress_steps: None,
+            agent: "WorkBuddy".into(),
+        };
+        let mut m = Model::default();
+        m.settings.follow_enabled = true;
+        m.apply(mk("a-u1", "sess-a", 1, Status::Working), "workbuddy", 100)
+            .unwrap();
+        m.apply(mk("a-u2", "sess-a", 2, Status::Done), "workbuddy", 110)
+            .unwrap();
+        m.apply(mk("b-u1", "sess-b", 1, Status::Done), "workbuddy", 120)
+            .unwrap();
+
+        let targets = voice_targets(&m, 130);
+        let ids: Vec<_> = targets.iter().map(|t| t.session.as_str()).collect();
+        assert!(ids.contains(&"sess-a"), "正在跑的会话要在列表里：{ids:?}");
+        assert!(ids.contains(&"sess-b"), "别的会话也要能选：{ids:?}");
+        assert!(
+            !ids.iter().any(|id| id.contains("-u")),
+            "必须用基础会话 id，深链才认：{ids:?}"
+        );
+        assert_eq!(
+            ids.iter().filter(|id| **id == "sess-b").count(),
+            1,
+            "同一会话的多轮要去重：{ids:?}"
+        );
     }
 
     #[test]
