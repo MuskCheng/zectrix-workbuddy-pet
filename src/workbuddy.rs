@@ -36,6 +36,15 @@ const WAIT_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 /// WorkBuddy 的权限请求不写会话 JSONL、日志里也无事件，只能这样从侧面推断。
 const PERM_CONFIRM_SECS: i64 = 10;
 
+/// 写入类调用「没有回执」最多当多久的等待：超过这个窗口还没结果，多半是用户
+/// 拒绝了、或调用被丢弃（实测有 Write 永久没有 function_call_result），不能
+/// 一直把整轮钉在等待态。提问类（AskUserQuestion）不受此限。
+const PERM_CONFIRM_WINDOW: i64 = 300;
+
+/// 主进程 `pending:` 通知没有配套的「已解除」日志（实测：用户点完允许后
+/// main.log 静默，只有渲染进程自己翻回 working）。所以只能用会话记录反推：
+/// 会话在通知之后又写了新记录，就说明这次确认已经过去、工具跑起来了。
+/// 不能按时间一律作废——真正卡住的确认会安静十几分钟，那时设备正是唯一提醒。
 /// 默认权限模式下会弹确认卡的写入类工具（Bash 在沙箱内自动放行不算）。
 fn needs_permission(name: &str) -> bool {
     matches!(
@@ -466,26 +475,44 @@ impl Cursor {
     }
 
     /// 是否处于「需要用户回来处理」：提问类工具立算；写入类工具要卡住超过
-    /// PERM_CONFIRM_SECS 才算（正常执行几秒内完成，卡住即权限确认卡在等）。
+    /// PERM_CONFIRM_SECS 才算（正常执行几秒内完成，卡住即权限确认卡在等），
+    /// 但超过 PERM_CONFIRM_WINDOW 仍无回执就不再算——那是被拒绝或丢失的调用。
     fn needs_user(&self, now: i64) -> bool {
         self.waiting.values().any(|(name, ts)| {
+            let age = now.saturating_sub(*ts);
             WAIT_TOOLS.contains(&name.as_str())
-                || (needs_permission(name) && now.saturating_sub(*ts) >= PERM_CONFIRM_SECS)
+                || (needs_permission(name) && (PERM_CONFIRM_SECS..=PERM_CONFIRM_WINDOW).contains(&age))
         })
     }
 
     /// 是否有写入确认在等（区别于提问），等待画面据此换文案。
     fn permission_pending(&self, now: i64) -> bool {
         self.waiting.values().any(|(name, ts)| {
-            needs_permission(name) && now.saturating_sub(*ts) >= PERM_CONFIRM_SECS
+            let age = now.saturating_sub(*ts);
+            needs_permission(name) && (PERM_CONFIRM_SECS..=PERM_CONFIRM_WINDOW).contains(&age)
         })
+    }
+
+    /// 主进程登记的「待确认」只有对得上一条**卡住的写入调用**时才作数。
+    ///
+    /// 实测 WorkBuddy 会给长时间运行的 Bash 也发 `pending kind=permission`
+    /// （一次两分钟的编译就会触发，还会弹系统通知「任务等待确认」），
+    /// 但那次调用根本没有 Write/Edit 的痕迹，电脑上也没有任何确认卡。
+    /// 只信这条日志会把正常工作误报成「请回电脑点允许」。
+    fn pending_corroborated(&self) -> bool {
+        self.pending_kind.as_deref() == Some("permission")
+            && self
+                .waiting
+                .values()
+                .any(|(name, _)| needs_permission(name))
     }
 
     fn status(&self, now: i64) -> Option<Status> {
         self.task.as_ref()?;
         // 主进程登记的待确认（提问或权限卡）与侧边栏「待确认」徽章同源，
-        // 是最权威的信号；会话记录里卡住工具的启发式只作兜底。
-        if self.pending_kind.is_some() || self.needs_user(now) {
+        // 但只在会话里也有一条卡住的写入调用时才算；会话记录里卡住工具的
+        // 启发式是主判据。
+        if self.pending_corroborated() || self.needs_user(now) {
             return Some(Status::Waiting);
         }
         Some(match self.last {
@@ -627,12 +654,30 @@ impl Cursor {
 /// - `[TaskNotify] completed: session=<uuid> …`
 ///
 /// 权限确认卡完全不写会话 JSONL，这是唯一能覆盖所有确认形态的信号源。
+/// 一条主进程登记：确认类型 + 收到通知的时刻（秒），时刻用来判过期。
+struct Pending {
+    kind: String,
+    at: i64,
+}
+
 #[derive(Default)]
 struct TaskNotify {
     /// main.log 已消费到的绝对字节偏移；文件轮转变小则从头重放。
     offset: u64,
-    /// 待确认会话：session id -> kind（question / permission）。
-    pending: HashMap<String, String>,
+    /// 待确认会话：session id -> 登记内容。
+    pending: HashMap<String, Pending>,
+}
+
+/// 取日志行自带的 `"timestamp":"…"`（RFC3339），解析不出来就退回当前时间——
+/// 过期判定只需要一个大致基准，宁可短一点也不能把旧通知当成新通知。
+fn line_time(line: &str) -> Option<i64> {
+    const KEY: &str = "\"timestamp\":\"";
+    let start = line.find(KEY)? + KEY.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    chrono::DateTime::parse_from_rfc3339(&rest[..end])
+        .ok()
+        .map(|d| d.timestamp())
 }
 
 /// 从 `session=<uuid> …` 片段里取会话 id。正式日志里是 uuid（十六进制与
@@ -661,12 +706,13 @@ impl TaskNotify {
     /// 喂一段日志文本，解析待确认事件。单独拆出来便于单测。
     fn ingest(&mut self, text: &str) {
         for line in text.lines() {
+            let at = line_time(line).unwrap_or_else(now_secs);
             if let Some(i) = line.find("[TaskNotify] pending: session=") {
                 let rest = &line[i + "[TaskNotify] pending: session=".len()..];
                 if let Some(id) = parse_session_id(rest) {
                     let kind = parse_kind(rest);
                     if !kind.is_empty() {
-                        self.pending.insert(id, kind);
+                        self.pending.insert(id, Pending { kind, at });
                     }
                 }
             } else if let Some(i) = line.find("[TaskNotify] completed: session=") {
@@ -677,6 +723,19 @@ impl TaskNotify {
             }
             // 其余 TaskNotify 行（onEvent/show/auth guide）没有状态语义，忽略。
         }
+    }
+
+    /// 这个会话此刻还该不该算「等你确认」。
+    ///
+    /// 只有一条硬条件：**会话在通知之后没有再写记录**。写了就说明这次确认
+    /// 已经过去（用户点了允许，工具开始跑），立刻让位给真实状态。
+    /// 没有解除日志可依赖，这是唯一可靠的反推。
+    fn kind_for(&self, session: &str, last_activity: i64) -> Option<String> {
+        let p = self.pending.get(session)?;
+        if last_activity > p.at + 1 {
+            return None;
+        }
+        Some(p.kind.clone())
     }
 
     /// 增量读取 main.log。尾部半行留到下次；首次接入只读最后 512 KiB，
@@ -804,6 +863,16 @@ impl Watcher {
         Ok(out)
     }
 
+    /// 每个会话最后一条已消费记录的时间（秒）。屏幕状态可能一直没变（同一轮
+    /// 里持续在跑），但会话文件是新的——占用闸门必须据此续期，否则会在任务
+    /// 正忙时到点把设备交还出去。
+    pub fn activity(&self) -> HashMap<String, i64> {
+        self.cursors
+            .values()
+            .filter_map(|c| c.task.clone().map(|t| (t, c.seen_at)))
+            .collect()
+    }
+
     /// 返回本轮新出现的状态事件；`at` 是记录时间（必要时回退到文件修改时间）。
     pub fn scan(&mut self) -> Result<Vec<(Event, i64)>> {
         let now = now_secs();
@@ -828,7 +897,7 @@ impl Watcher {
         self.notify.poll();
         for (path, c) in self.cursors.iter_mut() {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            c.pending_kind = self.notify.pending.get(stem).cloned();
+            c.pending_kind = self.notify.kind_for(stem, c.seen_at);
         }
         let files = self.files()?;
         self.cursors
@@ -861,7 +930,7 @@ impl Watcher {
                         ..Cursor::default()
                     };
                 }
-                cursor.pending_kind = self.notify.pending.get(&stem).cloned();
+                cursor.pending_kind = self.notify.kind_for(&stem, cursor.seen_at);
             }
             let mut chunk = vec![];
             {
@@ -1524,7 +1593,7 @@ mod tests {
         assert_eq!(
             n.pending
                 .get("9e0d76c1-d8df-4501-96ad-dba766f40344")
-                .map(String::as_str),
+                .map(|p| p.kind.as_str()),
             Some("permission"),
             "pending 必须按会话 id 与 kind 登记"
         );
@@ -1535,35 +1604,86 @@ mod tests {
     }
 
     #[test]
-    fn notify_log_permission_upgrades_waiting_without_jsonl() {
-        // 关键场景：权限确认卡不写会话 JSONL（截图实测），Bash 命令也不在
-        // 写入工具启发式里——只有 main.log 的 TaskNotify 事件能覆盖。
+    fn a_pending_notification_alone_is_not_a_confirmation() {
+        // 实测 WorkBuddy 会给长时间运行的 Bash 也发 `pending kind=permission`
+        // （一次两分钟的编译就会触发，系统通知都弹了），但电脑上根本没有确认卡。
+        // 只有会话里确实有一条卡住的写入调用，才允许把状态判成「等你确认」。
         let root = temp_root("notify-perm");
         let mut w = Watcher::new(root.clone());
         let now = now_secs();
         append(
             &root,
             &[
-                user("制作表情包", (now - 60) * 1000),
+                user("编译固件", (now - 60) * 1000),
                 json!({"type":"function_call","name":"Bash","callId":"b-1",
-                       "timestamp":(now - 20) * 1000,"arguments":"{}","cwd":"C:/work/pkg"}),
+                       "timestamp":(now - 20) * 1000,"arguments":"{}","cwd":"C:/work/fw"}),
             ],
         );
         w.scan().unwrap(); // 建立游标：此刻是工作中
 
-        // 主进程登记待确认，会话记录毫无新行——仍必须升为等待并点明确认。
         w.notify
-            .ingest("[TaskNotify] pending: session=sess-0001 kind=permission sent=false");
+            .ingest("[TaskNotify] pending: session=sess-0001 kind=permission sent=true");
+        let evs = w.scan().unwrap();
+        assert!(
+            evs.iter().all(|(e, _)| e.status != Status::Waiting),
+            "只有通知、没有卡住的写入调用，不许报「等你确认」"
+        );
+
+        // 真正的确认：会话里有一条超过窗口仍无回执的 Write。
+        append(
+            &root,
+            &[json!({"type":"function_call","name":"Write","callId":"w-1",
+                     "timestamp":(now - 15) * 1000,"arguments":"{}","cwd":"C:/work/fw"})],
+        );
         let evs = w.scan().unwrap();
         let ev = &evs.last().unwrap().0;
-        assert_eq!(ev.status, Status::Waiting, "主进程登记的待确认必须生效");
+        assert_eq!(ev.status, Status::Waiting, "卡住的写入必须升级为等待");
         assert!(ev.detail.contains("等你确认"), "{}", ev.detail);
 
-        // 用户在电脑上点了允许：JSONL 依旧无新行，也要立即恢复工作态。
-        w.notify
-            .ingest("[TaskNotify] completed: session=sess-0001 wasFocused=true sent=false");
+        // 用户在电脑上点了允许，结果落盘：立刻回到工作态。
+        append(
+            &root,
+            &[json!({"type":"function_call_result","callId":"w-1","status":"completed",
+                     "timestamp": now * 1000})],
+        );
         let evs = w.scan().unwrap();
         assert_eq!(evs.last().unwrap().0.status, Status::Working);
+    }
+
+    #[test]
+    fn pending_permission_is_cleared_by_newer_session_activity() {
+        // 实测 WorkBuddy 只写「弹出确认」，用户点完不写任何解除日志。唯一可靠
+        // 的反推：会话在通知之后又落了记录，就说明这次确认已经过去。
+        let mut n = TaskNotify::default();
+        n.ingest(concat!(
+            r#"{"timestamp":"2026-11-09T02:41:02.239Z","message":["[TaskNotify] pending: session=s1 kind=permission sent=true"]}"#,
+            "\n"
+        ));
+        let at = chrono::DateTime::parse_from_rfc3339("2026-11-09T02:41:02.239Z")
+            .unwrap()
+            .timestamp();
+        // 会话一直没新记录：确认仍在等——安静再久也不能按时间作废，
+        // 真正卡住的确认可能十几分钟没人管，那时设备是唯一提醒。
+        assert_eq!(n.kind_for("s1", at - 5).as_deref(), Some("permission"));
+        assert_eq!(n.kind_for("s1", at).as_deref(), Some("permission"));
+        assert_eq!(n.kind_for("s1", at - 600).as_deref(), Some("permission"));
+        // 会话又写了记录：已放行，立刻解除。
+        assert_eq!(n.kind_for("s1", at + 30), None);
+        // 别的会话不受影响。
+        assert_eq!(n.kind_for("s2", at), None);
+    }
+
+    #[test]
+    fn an_orphaned_write_stops_counting_as_waiting() {
+        // 实测存在永远没有 function_call_result 的 Write：卡住 10 秒先当权限确认，
+        // 但超过窗口就不再等，否则整轮会被一条丢失的调用永久钉在等待态。
+        let mut c = Cursor::default();
+        c.waiting
+            .insert("w-1".into(), ("Write".to_string(), 100));
+        assert!(!c.needs_user(105), "还没到确认窗口，按正常工作处理");
+        assert!(c.needs_user(115), "卡住 10 秒：按权限确认在等");
+        assert!(c.needs_user(300), "窗口内仍算等待");
+        assert!(!c.needs_user(500), "超过 5 分钟没有回执就不再等");
     }
 
     #[test]

@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{Duration, UNIX_EPOCH};
 use workbuddy_pet::{
     device, layout,
     model::{Event as TaskEvent, Model, Status, Task},
@@ -589,8 +590,24 @@ struct Store {
     format: String,
     /// 已经提醒过的指纹（见 `sound::notice_sig`）。持久化是为了让「补提醒」
     /// 在设备超时重连、守护重启后依然不重复响——同一次等待只吵人一次。
+    /// 存一组（而不是一个槽位）：多个会话同时等待时，后一个指纹不会把前一个
+    /// 挤掉，重连后不会因为「指纹被覆盖」再响一遍。旧版本存的是字符串，
+    /// `de_announced` 负责兼容读取。
+    #[serde(
+        default,
+        deserialize_with = "de_announced",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    announced: Vec<String>,
+    /// `announced` 最后一次写入的时刻。父子两个进程各持一份 state.json 快照，
+    /// 合并时按时间取新——否则父进程回写会把子进程刚响过的指纹盖回旧值，
+    /// 下一轮重连又响一次（实测一次等待响 4 遍）。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    announced_at: i64,
+    /// 上次交还设备的时刻（秒）。释放后安静一会儿再允许重新占用，
+    /// 避免「释放→新记录→立刻重占→再释放」的抖动（实测 20 分钟 13 轮）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    announced: Option<String>,
+    released_at: Option<i64>,
     /// 守护模式下，最后一个任务结束到交还设备之间保留多久（秒）。规则是
     /// 「任务完成后 5 分钟内没有新任务就解除占用」。`None` = 还没人设过，
     /// 跟随 `default_idle_grace()`——这样「显式设成 300」和「默认 300」能区分开，
@@ -622,13 +639,53 @@ fn default_format() -> String {
     "gray16".into()
 }
 
+fn is_zero(v: &i64) -> bool {
+    *v == 0
+}
+
+/// 兼容旧版 `state.json` 里的 `"announced": "…"`（单个字符串）与新版数组。
+/// 直接换成 `Vec<String>` 会让旧文件整份解析失败——那会把任务缓存一起丢掉，
+/// 相当于把所有历史重放一遍，代价太大。
+fn de_announced<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<Raw>::deserialize(deserializer)? {
+        None => Vec::new(),
+        Some(Raw::One(s)) => vec![s],
+        Some(Raw::Many(v)) => v,
+    })
+}
+
+/// 提醒指纹最多留几条：覆盖多会话同时等待，又不会把 state.json 撑大。
+const ANNOUNCED_KEEP: usize = 12;
+
+/// 交还设备后，设备要大约 8 秒才释放独占租约：这段时间内重连只会拿到
+/// 「设备忙碌」，还会把日志刷满。
+const RELEASE_LEASE: i64 = 8;
+
+/// 会话文件多久没动算「已停笔」。释放设备前必须满足它，否则会在对方
+/// 还在写日志的时候把连接撤掉，下一次扫描又把它拉起来。
+const WRITING_WINDOW: i64 = 30;
+
+/// 刚连上时的静音期：音频通路还没就绪就开播，喇叭容易「咔」一声。
+const SOUND_SETTLE: i64 = 3;
+
 impl Default for Store {
     fn default() -> Self {
         Self {
             model: Model::default(),
             target: None,
             format: default_format(),
-            announced: None,
+            announced: Vec::new(),
+            announced_at: 0,
+            released_at: None,
             idle_grace: None,
             skin_explicit: false,
         }
@@ -678,10 +735,14 @@ fn save_store(store: &Store) -> Result<()> {
         if out.format == default_format() && disk.format != default_format() {
             out.format = disk.format;
         }
-        // 提醒指纹是「谁先响过谁说了算」：内存里为空说明这次进程还没响过，
-        // 沿用磁盘上的，避免守护重启后把同一条等待又响一遍。
-        if out.announced.is_none() {
+        // 提醒指纹是「谁新谁说了算」：父子进程各持一份快照，只有按时间合并
+        // 才不会让慢半拍的那份把刚响过的指纹盖回去（盖回去 = 下轮重连再响）。
+        if disk.announced_at > out.announced_at {
             out.announced = disk.announced;
+            out.announced_at = disk.announced_at;
+        }
+        if out.released_at.is_none() {
+            out.released_at = disk.released_at;
         }
         if out.idle_grace.is_none() {
             out.idle_grace = disk.idle_grace;
@@ -832,6 +893,24 @@ fn scan_into(model: &mut Model, watcher: &mut Watcher) -> (Vec<TaskEvent>, bool)
             println!("[跟随] 定时任务会话不上屏：{stem}");
         }
     }
+    // 状态没变但会话还在写：把「最后活动时间」推上去。
+    // `event()` 只在展示内容变化时才产出事件，同一轮里状态长期不变时
+    // updated_at 会停在状态切换那一刻——5 分钟释放规则据此误判成「已经没人了」，
+    // 于是任务还在跑、设备却被交还，紧接着新记录又把它叫回来，来回抖。
+    let tick = now();
+    for (task_id, at) in watcher.activity() {
+        if let Some(t) = model
+            .tasks
+            .iter_mut()
+            .find(|t| t.source == "workbuddy" && t.event.task_id == task_id)
+        {
+            let at = at.min(tick);
+            if at > t.updated_at {
+                t.updated_at = at;
+                changed = true;
+            }
+        }
+    }
     // 左下角的上下文占用跟着「当前展示的会话」走：切任务、对话变长都能反映出来。
     // 只在整数百分比变化时触发推送——每 1% 刷一次墨水屏已足够，再多就是闪。
     let now = now();
@@ -863,21 +942,20 @@ fn render(model: &Model, frame: usize) -> Result<Vec<u8>> {
 /// 设备占用闸门：只有「确实该占着」的时候才握着这条独占连接。
 ///
 /// - 有任务在跑（Working）→ 占着，它随时会换画面。
-/// - 一轮对话结束（完成 / 等你处理）→ 从最后一次活动起算，静默 `grace` 秒就交还。
-///
-/// 关键：**「等你处理」不算活跃任务**。它只代表上一轮已经答完、等用户下一条，
-/// 若按活跃处理，5 分钟宽限永远不会触发，实际要等 `stale_minutes`（15 分钟）
-/// 兜底才释放——设备会一直被占着，别的程序进不来、墨水屏也被反复刷新。
+/// - 有确认/提问在等你（Waiting）→ 也占着：设备就是那条「回电脑处理」的通知，
+///   到点撒手会让提示和连接一起消失。实测一条写入确认等 18 分钟，旧规则
+///   5 分钟就释放，随后新记录又把它拉回来，20 分钟里抖了 13 轮。
+/// - 一轮对话结束（完成 / 已停止）→ 从最后一次活动起算，静默 `grace` 秒就交还。
 ///
 /// 判定用「最后一个任务多久没动静」而不是内存计时器：重启、重连后依然成立，
 /// 也天然覆盖「任务在断开期间结束」的情况。超过 `stale_minutes` 没更新的
 /// Working 已经算「状态待确认」，同样不再占着设备。
 fn should_hold(model: &Model, at: i64, grace: i64) -> bool {
-    if model
-        .running(at)
-        .iter()
-        .any(|t| t.status() == Status::Working)
-    {
+    let active = model.running(at);
+    if active.iter().any(|t| t.status() == Status::Working) {
+        return true;
+    }
+    if active.iter().any(|t| t.status() == Status::Waiting) {
         return true;
     }
     match model.tasks.iter().map(|t| t.updated_at).max() {
@@ -1526,7 +1604,18 @@ fn write_wav(path: &Path, samples: &[i16], rate: u32) -> Result<()> {
     Ok(())
 }
 
+/// 本次连接建立的时刻。刚连上时音频通路可能还没就绪，立刻播放会「咔」一声
+/// （实测重连后紧跟着的第一声尤其明显），先让链路安静几秒再响。
+static CONNECTED_AT: AtomicI64 = AtomicI64::new(0);
+
 async fn chime(dev: &zectrix_sdk::Device, status: Status, volume: u8) -> bool {
+    let since = CONNECTED_AT.load(Ordering::Relaxed);
+    if since > 0 {
+        let wait = SOUND_SETTLE - (now() - since);
+        if wait > 0 {
+            tokio::time::sleep(Duration::from_secs(wait as u64)).await;
+        }
+    }
     let audio = device::clip(&sound::pcm(status));
     match dev.play(&audio, volume).await {
         Ok(_) => {
@@ -1548,17 +1637,17 @@ async fn announce(dev: &Device, model: &Model, store: &mut Store, task: &Task) {
     if !model.settings.sound_enabled {
         return;
     }
-    let Some(sig) = sound::notice_sig(task) else {
-        return;
-    };
-    if store.announced.as_deref() == Some(sig.as_str()) {
-        return;
-    }
-    // 只有真的响出来才记指纹：播放失败（设备忙、音频通路未就绪）留到下次补。
-    if chime(dev, task.status(), model.settings.volume).await {
-        store.announced = Some(sig);
-        if let Err(e) = save_store(store) {
-            eprintln!("配置保存失败: {e}");
+    if let Some(sig) = sound::notice_sig(task) {
+        if !store.announced.iter().any(|s| s == &sig) && chime(dev, task.status(), model.settings.volume).await {
+            store.announced.push(sig);
+            let len = store.announced.len();
+            if len > ANNOUNCED_KEEP {
+                store.announced.drain(..len - ANNOUNCED_KEEP);
+            }
+            store.announced_at = now();
+            if let Err(e) = save_store(store) {
+                eprintln!("配置保存失败: {e}");
+            }
         }
     }
 }
@@ -1610,6 +1699,7 @@ async fn cmd_run(args: &Args) -> Result<()> {
             s.battery_percent, s.wifi_rssi_dbm
         );
     }
+    CONNECTED_AT.store(now(), Ordering::Relaxed);
 
     let watch = args.has("exit-with-workbuddy");
     // 待命模式（守护用）：任务结束就交还设备。手动 `run` 默认一直占着，便于调试。
@@ -1650,8 +1740,11 @@ async fn cmd_run(args: &Args) -> Result<()> {
                 }
                 // 交还设备的判定放在扫描之前：判定用上一拍的状态，
                 // grace 以秒计，差一拍不影响，却让「跟随已关闭」时也能正常释放。
-                if standby && may_release(&model, now(), grace) {
+                if standby && may_release(&model, now(), grace) && !session_writing(&model) {
                     println!("任务已结束（{grace} 秒内没有活跃任务）：释放设备，回到待命。");
+                    // 记下交还时刻：外层重新待命后，冷却期内不再立刻抢回来。
+                    store.released_at = Some(now());
+                    let _ = save_store(&store);
                     break Ok(());
                 }
                 if !model.settings.follow_enabled {
@@ -1781,7 +1874,23 @@ async fn wait_for_task(store: &mut Store, watcher: &mut Watcher) -> Result<bool>
         // 只看 running 会把「等你处理」也算进来，释放后立刻又被重占，
         // 变成「连上→等 5 分钟→释放→再连上」的循环。
         if should_hold(&store.model, now(), store.idle_grace()) {
-            return Ok(true);
+            // 刚交还过设备：只有「确实又有新记录」才重新占用。上一轮的宽限期
+            // 可能还剩着，光看 should_hold 会在冷却一过就再连一次、再放一次。
+            // 另外设备释放租约要 8 秒左右，抢太早只会拿到「设备忙碌」。
+            let ready = store
+                .released_at
+                .is_none_or(|r| now().saturating_sub(r) >= RELEASE_LEASE);
+            let fresh = store
+                .released_at
+                .is_none_or(|r| store.model.tasks.iter().any(|t| t.updated_at > r));
+            let working = store
+                .model
+                .running(now())
+                .iter()
+                .any(|t| t.status() == Status::Working);
+            if ready && (working || fresh) {
+                return Ok(true);
+            }
         }
     }
 }
@@ -1805,6 +1914,56 @@ fn device_hint(e: &anyhow::Error) -> Option<&'static str> {
         }
         _ => None,
     }
+}
+
+/// 最近 `WRITING_WINDOW` 秒内还有**正在跟随的**会话文件在增长：说明那边的活没停。
+/// 屏幕上的状态可能没变（同一轮里持续在跑），但这时候把设备交还，下一次扫描
+/// 又会把它抢回来——先等它停笔。只认模型里跟踪的会话，定时任务等不上屏的
+/// 文件不能拿来续命，否则设备会被它们永久占住。
+fn session_writing(model: &Model) -> bool {
+    let tracked: std::collections::HashSet<&str> = model
+        .tasks
+        .iter()
+        .filter(|t| t.source == "workbuddy")
+        .filter_map(|t| t.event.thread_id.as_deref())
+        .collect();
+    if tracked.is_empty() {
+        return false;
+    }
+    let Ok(projects) = std::fs::read_dir(workbuddy_root()) else {
+        return false;
+    };
+    let deadline = now() - WRITING_WINDOW;
+    for project in projects.flatten() {
+        let dir = project.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if !tracked.contains(stem) {
+                continue;
+            }
+            let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            let secs = modified
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if secs >= deadline {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 async fn cmd_watch(args: &Args) -> Result<()> {
@@ -2002,6 +2161,11 @@ fn usage() {
 async fn main() {
     let args = Args::parse(std::env::args().skip(1).collect());
     let cmd = args.cmd.clone();
+    // `--version` / `-V`：只打版本号，别掉进 usage 分支。
+    if args.cmd == "version" || args.cmd == "-V" || args.has("version") {
+        println!("workbuddy-pet {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let result = match cmd.as_str() {
         "preview" | "scene" => {
             if cmd == "scene" {
@@ -2120,25 +2284,26 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_turn_releases_after_the_grace_even_if_it_waits_for_input() {
-        // 「等你处理」= 上一轮已经答完、等用户下一条。它必须在宽限期内继续占着
-        // （用户随时可能接着问），但满 grace 就要交还：不能靠 15 分钟 stale 兜底，
-        // 否则「5 分钟没有新会话就停止占用」这条规则永远不会生效。
+    fn a_pending_confirmation_keeps_the_device_until_it_is_answered() {
+        // 「等你确认 / 等你回答」不是「一轮答完了」——它就是要人回电脑，
+        // 而设备正是这条通知唯一的出口。到点撒手会让确认卡和连接一起消失，
+        // 紧接着新记录又把它拉回来（实测 20 分钟抖了 13 轮）。
         let m = model_with(1, Status::Waiting, 100);
-        assert!(!may_release(&m, 100, 60));
-        assert!(!may_release(&m, 159, 60));
-        assert!(may_release(&m, 160, 60));
-        // 默认 300 秒：第 299 秒还占着，第 300 秒交还。
-        assert!(!may_release(&m, 399, 300));
-        assert!(may_release(&m, 400, 300));
-        // 释放后待命循环也不能把它重新当成「有任务」：否则会连上→等 5 分钟→
-        // 释放→再连上的死循环，比一直占着更糟。
-        assert!(!should_hold(&m, 400, 300));
-        // 同一时刻来了新消息，立刻重新占用。
-        let mut m2 = m.clone();
-        m2.apply(event(2, Status::Working), "workbuddy", 400)
+        assert!(should_hold(&m, 400, 300));
+        assert!(!may_release(&m, 5_000, 300));
+        // 超过 15 分钟也不算「状态待确认」：等待不会自己往前走，但依然有效。
+        assert_eq!(
+            m.current(5_000).map(|t| t.status()),
+            Some(Status::Waiting),
+            "等待确认的任务不能被陈旧判定降级"
+        );
+
+        // 确认处理完、这一轮结束：从结束那一刻起算，满 grace 才交还。
+        let mut done = m.clone();
+        done.apply(event(2, Status::Done), "workbuddy", 5_000)
             .unwrap();
-        assert!(should_hold(&m2, 400, 300));
+        assert!(!may_release(&done, 5_299, 300));
+        assert!(may_release(&done, 5_300, 300));
 
         // 还在跑的任务不受宽限影响：一直占着（静默超过 15 分钟才算状态待确认）。
         let m = model_with(1, Status::Working, 100);

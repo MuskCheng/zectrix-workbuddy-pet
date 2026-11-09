@@ -41,8 +41,8 @@
 **A. 直接下载（最快，无需编译）**
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.3.1-windows-x64.exe`。约 5.4 MB 静态链接单文件，不依赖 .NET、VC++ 运行库或 Rust 工具链。
-可选核对完整性：`(Get-FileHash .\workbuddy-pet-0.3.1-windows-x64.exe -Algorithm SHA256).Hash`，
+`workbuddy-pet-0.3.2-windows-x64.exe`。约 5.4 MB 静态链接单文件，不依赖 .NET、VC++ 运行库或 Rust 工具链。
+可选核对完整性：`(Get-FileHash .\workbuddy-pet-0.3.2-windows-x64.exe -Algorithm SHA256).Hash`，
 对比同页的 `SHA256SUMS.txt`。
 
 **B. 交给脚本（本机一键构建 + 部署）**
@@ -120,7 +120,8 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 
 心跳超过 20 秒算过期，看门狗会自己补。看门狗显示「已停止」时重跑 `autostart on`。
 
-日常行为：任务在跑时占用设备并推送；一轮答完（完成 / 等你处理）后再守 5 分钟，没有新会话就交还设备
+日常行为：任务在跑时占用设备并推送；弹了确认/提问就保持占用、画面停在「等你确认」，
+直到你处理完；一轮答完（完成）后再守 5 分钟，没有新会话就交还设备
 （`--idle-grace 秒数` 可调，`0` 为立即交还）。墨水屏断电保留最后一帧，交还不会让画面消失。
 
 ## 命令速查

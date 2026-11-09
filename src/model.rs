@@ -358,7 +358,12 @@ impl Model {
             .collect();
         tasks.sort_by_key(|t| std::cmp::Reverse((t.updated_at, t.event.seq)));
         for t in &mut tasks {
-            if now.saturating_sub(t.updated_at) > self.settings.stale_minutes as i64 * 60 {
+            // 等待用户处理的这一条不算「陈旧」：它不会自己往前走，但它仍然有效——
+            // 屏幕要一直停在「等你确认」，不能过 15 分钟就变成「状态待确认」，
+            // 更不能因此被交还设备。陈旧只用来降级那些没人管的工作态。
+            if t.event.status != Status::Waiting
+                && now.saturating_sub(t.updated_at) > self.settings.stale_minutes as i64 * 60
+            {
                 t.stale = true;
             }
         }
@@ -436,10 +441,20 @@ impl Model {
             }
         }
         let tasks = self.live(now);
+        // 有人正在干活就显示它（最新的那一轮）；没人干活时才让位给等待确认的。
+        // 旧顺序把 Waiting 无条件排在 Working 前面，一条几分钟前就处理完的等待
+        // 会长期霸屏，看起来像「宠物不跟了」——实测设备一直停在别的会话的
+        // 「等你处理」，而这边正常在跑。
         tasks
             .iter()
-            .find(|t| t.status() == Status::Waiting)
-            .or_else(|| tasks.iter().find(|t| t.status() == Status::Working))
+            .filter(|t| t.status() == Status::Working)
+            .max_by_key(|t| t.updated_at)
+            .or_else(|| {
+                tasks
+                    .iter()
+                    .filter(|t| t.status() == Status::Waiting)
+                    .max_by_key(|t| t.updated_at)
+            })
             .or_else(|| tasks.first())
             .cloned()
     }
@@ -536,16 +551,49 @@ mod tests {
         assert_eq!(m.running(14).len(), 2);
         assert_eq!(m.running(14)[0].event.task_id, "other");
         assert_eq!(m.running(14)[1].status(), Status::Waiting);
-        assert_eq!(m.current(14).unwrap().status(), Status::Waiting);
+        // 有会话在跑就显示在跑的那条；等待确认的排它后面。
+        assert_eq!(m.current(14).unwrap().event.task_id, "other");
+        assert_eq!(m.current(14).unwrap().status(), Status::Working);
         m.selected = Some("workbuddy:new-turn".into());
-        assert_eq!(m.current(14).unwrap().status(), Status::Waiting);
+        assert_eq!(m.current(14).unwrap().status(), Status::Working);
         let mut update = m.running(14)[0].event.clone();
         update.seq += 1;
         update.status = Status::Waiting;
         m.apply(update, "workbuddy", 15).unwrap();
         assert_eq!(m.running(15)[0].event.task_id, "other");
-        assert!(m.running(2000).is_empty());
+        assert!(m.running(2000).len() == 2);
+        // 等待确认不会自己过期：20 分钟后仍留在列表里——屏幕必须一直显示它，
+        // 直到有人处理或这一轮真正结束。
+        assert!(m.running(2000).iter().all(|t| t.status() == Status::Waiting));
     }
+    #[test]
+    fn a_live_task_beats_an_older_waiting_one() {
+        // 实测：A 会话几分钟前弹过确认（后来已放行），B 会话正在跑；
+        // 旧逻辑无条件优先 Waiting，设备就一直停在 A 的「等你处理」上，
+        // 看起来像「宠物不跟了」。有人干活时必须显示干活的。
+        let mut m = Model::default();
+        m.settings.follow_enabled = true;
+        let mut waiting = ev(1, Status::Waiting);
+        waiting.task_id = "old".into();
+        waiting.thread_id = Some("chat-a".into());
+        waiting.detail = "有写入操作等你确认 · 请回电脑点允许".into();
+        m.apply(waiting, "workbuddy", 100).unwrap();
+
+        let mut working = ev(2, Status::Working);
+        working.task_id = "live".into();
+        working.thread_id = Some("chat-b".into());
+        m.apply(working, "workbuddy", 200).unwrap();
+        assert_eq!(m.current(210).unwrap().event.task_id, "live");
+
+        // 没人干活时才轮到等待确认的那条——它才是需要人处理的。
+        let mut done = ev(3, Status::Done);
+        done.task_id = "live".into();
+        done.thread_id = Some("chat-b".into());
+        m.apply(done, "workbuddy", 300).unwrap();
+        assert_eq!(m.current(310).unwrap().event.task_id, "old");
+        assert_eq!(m.current(310).unwrap().status(), Status::Waiting);
+    }
+
     #[test]
     fn terminal_task_revives_on_later_nonterminal_event() {
         let mut m = Model::default();
