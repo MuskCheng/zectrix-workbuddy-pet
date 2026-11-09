@@ -36,6 +36,10 @@ const WAIT_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 /// WorkBuddy 的权限请求不写会话 JSONL、日志里也无事件，只能这样从侧面推断。
 const PERM_CONFIRM_SECS: i64 = 10;
 
+/// `pending:` 通知的有效期。确认卡挂着时 WorkBuddy 大约每分钟重发一次，
+/// 不再重发就说明卡早散了（它不写「已解除」）。只用来判断「这张卡属于谁」。
+const PENDING_TTL: i64 = 180;
+
 /// 写入类调用「没有回执」最多当多久的等待：超过这个窗口还没结果，多半是用户
 /// 拒绝了、或调用被丢弃（实测有 Write 永久没有 function_call_result），不能
 /// 一直把整轮钉在等待态。提问类（AskUserQuestion）不受此限。
@@ -493,26 +497,9 @@ impl Cursor {
         })
     }
 
-    /// 主进程登记的「待确认」只有对得上一条**卡住的写入调用**时才作数。
-    ///
-    /// 实测 WorkBuddy 会给长时间运行的 Bash 也发 `pending kind=permission`
-    /// （一次两分钟的编译就会触发，还会弹系统通知「任务等待确认」），
-    /// 但那次调用根本没有 Write/Edit 的痕迹，电脑上也没有任何确认卡。
-    /// 只信这条日志会把正常工作误报成「请回电脑点允许」。
-    fn pending_corroborated(&self) -> bool {
-        self.pending_kind.as_deref() == Some("permission")
-            && self
-                .waiting
-                .values()
-                .any(|(name, _)| needs_permission(name))
-    }
-
     fn status(&self, now: i64) -> Option<Status> {
         self.task.as_ref()?;
-        // 主进程登记的待确认（提问或权限卡）与侧边栏「待确认」徽章同源，
-        // 但只在会话里也有一条卡住的写入调用时才算；会话记录里卡住工具的
-        // 启发式是主判据。
-        if self.pending_corroborated() || self.needs_user(now) {
+        if self.waiting_visible(now) {
             return Some(Status::Waiting);
         }
         Some(match self.last {
@@ -520,6 +507,26 @@ impl Cursor {
             Last::AssistantStopped => Status::Stopped,
             _ => Status::Working,
         })
+    }
+
+    /// 此刻是否该报「等你处理」。
+    ///
+    /// 界面是唯一能一锤定音的信号：确认卡、提问卡在屏幕上时，一定摆着一组
+    /// 「允许 / 拒绝」按钮。日志分不开——WorkBuddy 对长时间运行的 Bash 也发
+    /// `pending kind=permission`；会话记录也分不开——等确认时工具没结果，
+    /// 命令在跑时同样没结果，两边都是一片空白。之前只靠这两样，结果要么
+    /// 误报（编译中被提示去点允许），要么漏报（真确认卡被当成正常在跑）。
+    fn waiting_visible(&self, now: i64) -> bool {
+        // 唯一可靠的信号是 main.log 的 `pending:`：它只在真弹确认卡时写。
+        //
+        // 试过从界面读「允许/拒绝」按钮，实测**读不到**——这张卡不在 Chromium
+        // 暴露的可访问性树里（同一时刻树里 271 个节点，没有任何卡上的文案），
+        // 所以 `uia confirm` 永远是 false，只会把真确认压掉。
+        //
+        // 也不能要求「卡住的必须是写文件类工具」：文件写入确认是挂在 **Bash**
+        // 命令上的（截图：命令会写 Xxx.db-wal 时弹「允许写入 / 拒绝」），
+        // 而 Bash 不在写入工具名单里——之前就是这样漏掉的。
+        self.pending_kind.is_some() || self.needs_user(now)
     }
 
     /// `todo_write` 是这一轮唯一可核对的进度来源：清单由 Agent 自己写出，
@@ -666,6 +673,9 @@ struct TaskNotify {
     offset: u64,
     /// 待确认会话：session id -> 登记内容。
     pending: HashMap<String, Pending>,
+    /// 最近一次登记的会话与时刻。界面上的确认卡同一时刻只有一张，
+    /// 必须知道它属于谁——否则「界面有卡」会让所有历史会话一起变成等待。
+    recent: Option<(String, i64)>,
 }
 
 /// 取日志行自带的 `"timestamp":"…"`（RFC3339），解析不出来就退回当前时间——
@@ -712,12 +722,16 @@ impl TaskNotify {
                 if let Some(id) = parse_session_id(rest) {
                     let kind = parse_kind(rest);
                     if !kind.is_empty() {
+                        self.recent = Some((id.clone(), at));
                         self.pending.insert(id, Pending { kind, at });
                     }
                 }
             } else if let Some(i) = line.find("[TaskNotify] completed: session=") {
                 let rest = &line[i + "[TaskNotify] completed: session=".len()..];
                 if let Some(id) = parse_session_id(rest) {
+                    if self.recent.as_ref().is_some_and(|(s, _)| s == &id) {
+                        self.recent = None;
+                    }
                     self.pending.remove(&id);
                 }
             }
@@ -730,8 +744,13 @@ impl TaskNotify {
     /// 只有一条硬条件：**会话在通知之后没有再写记录**。写了就说明这次确认
     /// 已经过去（用户点了允许，工具开始跑），立刻让位给真实状态。
     /// 没有解除日志可依赖，这是唯一可靠的反推。
-    fn kind_for(&self, session: &str, last_activity: i64) -> Option<String> {
+    fn kind_for(&self, session: &str, now: i64, last_activity: i64) -> Option<String> {
         let p = self.pending.get(session)?;
+        // 过期就作废：确认卡挂着时 WorkBuddy 每分钟重发一次，不再重发
+        // 说明卡早散了（它不写「已解除」）。
+        if now.saturating_sub(p.at) > PENDING_TTL {
+            return None;
+        }
         if last_activity > p.at + 1 {
             return None;
         }
@@ -897,7 +916,7 @@ impl Watcher {
         self.notify.poll();
         for (path, c) in self.cursors.iter_mut() {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            c.pending_kind = self.notify.kind_for(stem, c.seen_at);
+            c.pending_kind = self.notify.kind_for(stem, now, c.seen_at);
         }
         let files = self.files()?;
         self.cursors
@@ -930,7 +949,7 @@ impl Watcher {
                         ..Cursor::default()
                     };
                 }
-                cursor.pending_kind = self.notify.kind_for(&stem, cursor.seen_at);
+                cursor.pending_kind = self.notify.kind_for(&stem, now, cursor.seen_at);
             }
             let mut chunk = vec![];
             {
@@ -1604,10 +1623,13 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_notification_alone_is_not_a_confirmation() {
-        // 实测 WorkBuddy 会给长时间运行的 Bash 也发 `pending kind=permission`
-        // （一次两分钟的编译就会触发，系统通知都弹了），但电脑上根本没有确认卡。
-        // 只有会话里确实有一条卡住的写入调用，才允许把状态判成「等你确认」。
+    fn a_pending_notification_marks_the_session_as_waiting() {
+        // 文件写入确认是挂在 **Bash** 命令上的（截图：命令会写 Xxx.db-wal 时
+        // 弹「允许写入 / 拒绝」），而 Bash 不在写入工具名单里。之前要求「必须
+        // 卡住一条 Write」就把这类确认全漏掉了；界面上也读不到这张卡（实测它
+        // 不在可访问性树里，同一时刻 271 个节点没有任何卡上的文案）。
+        // 所以 main.log 的 pending 是唯一信号：会话在通知之后没有再写记录，
+        // 就说明还停在卡上等人点。
         let root = temp_root("notify-perm");
         let mut w = Watcher::new(root.clone());
         let now = now_secs();
@@ -1619,35 +1641,30 @@ mod tests {
                        "timestamp":(now - 20) * 1000,"arguments":"{}","cwd":"C:/work/fw"}),
             ],
         );
-        w.scan().unwrap(); // 建立游标：此刻是工作中
+        w.scan().unwrap(); // 建立游标
 
         w.notify
             .ingest("[TaskNotify] pending: session=sess-0001 kind=permission sent=true");
         let evs = w.scan().unwrap();
-        assert!(
-            evs.iter().all(|(e, _)| e.status != Status::Waiting),
-            "只有通知、没有卡住的写入调用，不许报「等你确认」"
-        );
-
-        // 真正的确认：会话里有一条超过窗口仍无回执的 Write。
-        append(
-            &root,
-            &[json!({"type":"function_call","name":"Write","callId":"w-1",
-                     "timestamp":(now - 15) * 1000,"arguments":"{}","cwd":"C:/work/fw"})],
-        );
-        let evs = w.scan().unwrap();
         let ev = &evs.last().unwrap().0;
-        assert_eq!(ev.status, Status::Waiting, "卡住的写入必须升级为等待");
+        assert_eq!(
+            ev.status,
+            Status::Waiting,
+            "Bash 触发的文件写入确认也必须报等待"
+        );
         assert!(ev.detail.contains("等你确认"), "{}", ev.detail);
 
-        // 用户在电脑上点了允许，结果落盘：立刻回到工作态。
-        append(
-            &root,
-            &[json!({"type":"function_call_result","callId":"w-1","status":"completed",
-                     "timestamp": now * 1000})],
-        );
+        // 用户点了允许：工具跑起来，会话落了新记录 → 恢复工作态。
+        append(&root, &[user("继续", (now + 2) * 1000)]);
+        // `pending_kind` 用的是上一拍的 `seen_at`，所以这一拍先把新记录吃进来，
+        // 下一拍才据此判定「已放行」——最多晚 2 秒，不值得为此打乱扫描顺序。
+        w.scan().unwrap();
         let evs = w.scan().unwrap();
-        assert_eq!(evs.last().unwrap().0.status, Status::Working);
+        assert_eq!(
+            evs.last().unwrap().0.status,
+            Status::Working,
+            "通知之后又写了记录 = 已经放行"
+        );
     }
 
     #[test]
@@ -1664,13 +1681,13 @@ mod tests {
             .timestamp();
         // 会话一直没新记录：确认仍在等——安静再久也不能按时间作废，
         // 真正卡住的确认可能十几分钟没人管，那时设备是唯一提醒。
-        assert_eq!(n.kind_for("s1", at - 5).as_deref(), Some("permission"));
-        assert_eq!(n.kind_for("s1", at).as_deref(), Some("permission"));
-        assert_eq!(n.kind_for("s1", at - 600).as_deref(), Some("permission"));
+        assert_eq!(n.kind_for("s1", at, at - 5).as_deref(), Some("permission"));
+        assert_eq!(n.kind_for("s1", at, at).as_deref(), Some("permission"));
+        assert_eq!(n.kind_for("s1", at, at - 600).as_deref(), Some("permission"));
         // 会话又写了记录：已放行，立刻解除。
-        assert_eq!(n.kind_for("s1", at + 30), None);
+        assert_eq!(n.kind_for("s1", at, at + 30), None);
         // 别的会话不受影响。
-        assert_eq!(n.kind_for("s2", at), None);
+        assert_eq!(n.kind_for("s2", at, at), None);
     }
 
     #[test]

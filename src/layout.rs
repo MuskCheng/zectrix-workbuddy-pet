@@ -296,9 +296,146 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
     );
     json!({"canvas":{"w":400,"h":300},"elements":e})
 }
+
+/// 语音投递确认页：识别文本 + 目标会话 + 还能等几秒。
+///
+/// 这一页要回答三个问题，所以版式按「结论 → 内容 → 操作」竖着排：
+/// 投给谁（标题）、说了什么（正文）、现在能做什么（底部）。
+pub fn voice(draft: &crate::voice::Draft, now: i64) -> Value {
+    let mut e = vec![];
+    text(&mut e, "ZECTRIX / 语音投递", 16, 19, 12, 260);
+    rect_r(&mut e, 326, 8, 58, 22, 7, Some(0));
+    text_white(&mut e, "语音", 341, 24, 14, 30);
+
+    // 目标会话：没有会话时也要说清楚「会粘贴到哪儿」，不能让人以为丢失了。
+    let target = match draft.target() {
+        Some(t) => format!("→ {}", t.title),
+        None => "→ 当前窗口".to_string(),
+    };
+    for (i, line) in title_lines(&target, 26, 1).iter().enumerate() {
+        text(&mut e, line, 16, 59 + i as i32 * 30, 24, 340);
+    }
+    rect(&mut e, 16, 84, 368, 0, None);
+
+    let body = if draft.text.trim().is_empty() {
+        "（没听清，再说一次）".to_string()
+    } else {
+        draft.text.trim().to_string()
+    };
+    // 短句放大、长句缩小：一句话占半屏时 15 号字太小，一个字都看不清；
+    // 而长句必须能整段塞进来，所以按行数反过来选字号。
+    let mut lines = title_lines(&body, 48, 6);
+    let (size, lh) = if lines.len() <= 2 {
+        lines = title_lines(&body, 40, 5);
+        (18, 25)
+    } else {
+        (15, 19)
+    };
+    for (i, line) in lines.iter().enumerate() {
+        text(&mut e, line, 16, 106 + i as i32 * lh, size, 360);
+    }
+    // 小字跟在正文后面，别钉死在底部：只说一句话时中间留一大片空白很难看。
+    let foot_y = (106 + lines.len() as i32 * lh + 6).min(228);
+    // 第二行小字平时报「录了几秒、只粘贴不发送」；投递失败后换成失败原因，
+    // 让人知道该再按一次还是去电脑上看看窗口。
+    let foot = draft.hint.clone().unwrap_or_else(|| {
+        format!("{:.1} 秒录音 · 只粘贴，不发送", draft.seconds)
+    });
+    text(&mut e, &foot, 16, foot_y, 11, 330);
+
+    // 底部操作条：黑底白字，和主界面的「回电脑确认」一致，读一眼就知道下一步。
+    rect_r(&mut e, 16, 240, 368, 30, 6, Some(0));
+    let hint = if draft.targets.len() > 1 {
+        format!(
+            "上下键 换会话（{}/{}） · 确认键 粘贴",
+            draft.index + 1,
+            draft.targets.len()
+        )
+    } else {
+        "确认键 粘贴到输入框".to_string()
+    };
+    text_white(&mut e, &hint, 26, 260, 13, 300);
+
+    let left = (draft.expires_at - now).max(0);
+    text(&mut e, &format!("{left} 秒后丢弃"), 16, 290, 11, 200);
+    text_right(&mut e, "语音由本机转写", 200, 290, 11, 184);
+
+    json!({"canvas":{"w":400,"h":300},"elements":e})
+}
+/// 语音流程中的过渡页（「识别中」「没听清」「投递失败」）。
+///
+/// 只放一句话 + 一行解释：这些状态都是一两秒就过去的，不需要更多信息，
+/// 多写反而让人以为要等他操作。
+pub fn voice_note(title: &str, detail: &str, dots: usize) -> Value {
+    let mut e = vec![];
+    text(&mut e, "ZECTRIX / 语音投递", 16, 19, 12, 260);
+    text(&mut e, title, 16, 104, 26, 368);
+    for (i, line) in title_lines(detail, 46, 3).iter().enumerate() {
+        text(&mut e, line, 16, 150 + i as i32 * 20, 15, 360);
+    }
+    // 三个点的进度节奏：不给具体百分比，因为转写耗时会随句子长短变。
+    let waiting = "·".repeat(dots.min(3)) + &" ".repeat(3 - dots.min(3));
+    text(&mut e, &waiting, 16, 240, 18, 200);
+    text_right(&mut e, "语音由本机转写", 200, 290, 11, 184);
+    json!({"canvas":{"w":400,"h":300},"elements":e})
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn voice_pages_stay_inside_the_canvas() {
+        let targets = vec![
+            crate::voice::Target {
+                session: "a".into(),
+                title: "基础固件编译".into(),
+            },
+            crate::voice::Target {
+                session: "b".into(),
+                title: "写周报".into(),
+            },
+        ];
+        let d = crate::voice::Draft::new(
+            "把今天的会议纪要整理成三条要点，发到项目群里。".into(),
+            3.2,
+            targets,
+            100,
+        );
+        let scenes = [
+            voice(&d, 100),
+            voice(&d, 130), // 过期后剩 0 秒，不能出现负数
+            voice_note("正在识别…", "松手后在本机转写，音频不上传云端", 2),
+            voice_note("转写失败", "很长的错误信息也要能折行放进版心，不能顶到边框外面去", 0),
+        ];
+        for v in scenes {
+            let e = v["elements"].as_array().unwrap();
+            assert!(e.len() <= 200);
+            for el in e {
+                assert!(el["x"].as_i64().unwrap() >= 0);
+                assert!(el["y"].as_i64().unwrap() < 300);
+            }
+        }
+    }
+
+    #[test]
+    fn voice_draft_cycles_between_sessions_only_when_there_are_two() {
+        let t = |s: &str| crate::voice::Target {
+            session: s.into(),
+            title: s.into(),
+        };
+        let mut one = crate::voice::Draft::new("x".into(), 1.0, vec![t("a")], 0);
+        one.cycle(1);
+        one.cycle(-1);
+        assert_eq!(one.index, 0, "只有一个目标时按键不该改变选择");
+
+        let mut two = crate::voice::Draft::new("x".into(), 1.0, vec![t("a"), t("b")], 0);
+        two.cycle(1);
+        assert_eq!(two.target().unwrap().session, "b");
+        two.cycle(1);
+        assert_eq!(two.target().unwrap().session, "a", "到末尾要绕回第一个");
+        two.cycle(-1);
+        assert_eq!(two.target().unwrap().session, "b", "往前也要绕");
+    }
+
     #[test]
     fn fixed_rows_survive_heartbeats_selection_and_time() {
         for count in [2usize, 3, 4, 5, 9, 10] {

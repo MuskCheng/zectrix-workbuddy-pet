@@ -122,6 +122,22 @@ fn implausible_reason_is_none(name: &str) -> Option<String> {
     Some(text.to_string())
 }
 
+/// WorkBuddy 窗口里的一个可访问性节点。只用于诊断/探测输入框位置。
+#[derive(Clone, Debug)]
+pub struct Node {
+    pub control: String,
+    pub class: String,
+    pub name: String,
+    pub focusable: bool,
+    /// 支持的 UIA 模式（value / text / invoke…），空表示只有基础属性。
+    pub patterns: String,
+}
+
+/// 把 WorkBuddy 窗口整棵可访问性树摊平成节点列表（诊断用，400+ 节点）。
+pub fn dump_nodes() -> Vec<Node> {
+    imp::dump_nodes()
+}
+
 #[cfg(windows)]
 mod imp {
     use super::*;
@@ -149,6 +165,41 @@ mod imp {
         reply_rx.recv_timeout(PROBE_TIMEOUT).ok().flatten()
     }
 
+    /// 诊断通道：同样是「独占 COM 的常驻线程」，避免每次探测都重开 COM。
+    static DUMP: OnceLock<Sender<Sender<Vec<Node>>>> = OnceLock::new();
+
+    pub fn dump_nodes() -> Vec<Node> {
+        let tx = DUMP.get_or_init(spawn_dump).clone();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if tx.send(reply_tx).is_err() {
+            return vec![];
+        }
+        reply_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_default()
+    }
+
+    fn spawn_dump() -> Sender<Sender<Vec<Node>>> {
+        let (tx, rx) = mpsc::channel::<Sender<Vec<Node>>>();
+        std::thread::Builder::new()
+            .name("uia-dump".into())
+            .spawn(move || {
+                let automation: Option<IUIAutomation> = unsafe {
+                    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+                    CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()
+                };
+                for reply in rx {
+                    let value = match &automation {
+                        Some(a) => read_nodes(a),
+                        None => vec![],
+                    };
+                    let _ = reply.send(value);
+                }
+            })
+            .ok();
+        tx
+    }
+
     fn spawn() -> mpsc::Sender<Sender<Option<String>>> {
         let (tx, rx) = mpsc::channel::<Sender<Option<String>>>();
         std::thread::Builder::new()
@@ -170,6 +221,116 @@ mod imp {
             })
             .ok();
         tx
+    }
+
+    /// 摊平整棵树（诊断用）。控件类型按 UIA 的 50000 段编号翻成短名。
+    fn read_nodes(automation: &IUIAutomation) -> Vec<Node> {
+        let Some(root) = element_of_workbuddy(automation) else {
+            return vec![];
+        };
+        let Ok(condition) = (unsafe { automation.CreateTrueCondition() }) else {
+            return vec![];
+        };
+        let Ok(found) = (unsafe { root.FindAll(TreeScope_Descendants, &condition) }) else {
+            return vec![];
+        };
+        let Ok(count) = (unsafe { found.Length() }) else {
+            return vec![];
+        };
+        let mut nodes = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let Ok(element) = (unsafe { found.GetElement(index) }) else {
+                continue;
+            };
+            let control = match unsafe { element.CurrentControlType() } {
+                Ok(t) => match t.0 {
+                    50000 => "Button".into(),
+                    50001 => "Calendar".into(),
+                    50002 => "CheckBox".into(),
+                    50003 => "ComboBox".into(),
+                    50004 => "Edit".into(),
+                    50005 => "Hyperlink".into(),
+                    50006 => "Image".into(),
+                    50007 => "ListItem".into(),
+                    50008 => "List".into(),
+                    50009 => "Menu".into(),
+                    50010 => "MenuBar".into(),
+                    50011 => "MenuItem".into(),
+                    50012 => "ProgressBar".into(),
+                    50013 => "RadioButton".into(),
+                    50014 => "ScrollBar".into(),
+                    50015 => "Slider".into(),
+                    50016 => "Spinner".into(),
+                    50017 => "StatusBar".into(),
+                    50018 => "Tab".into(),
+                    50019 => "TabItem".into(),
+                    50020 => "Text".into(),
+                    50021 => "ToolBar".into(),
+                    50022 => "ToolTip".into(),
+                    50023 => "Tree".into(),
+                    50024 => "TreeItem".into(),
+                    50025 => "Custom".into(),
+                    50026 => "Group".into(),
+                    50027 => "Thumb".into(),
+                    50028 => "DataGrid".into(),
+                    50029 => "DataItem".into(),
+                    50030 => "Document".into(),
+                    50031 => "SplitButton".into(),
+                    50032 => "Window".into(),
+                    50033 => "Pane".into(),
+                    other => format!("t{other}"),
+                },
+                Err(_) => continue,
+            };
+            let class = unsafe { element.CurrentClassName() }
+                .map(|b| b.to_string())
+                .unwrap_or_default();
+            let name = unsafe { element.CurrentName() }
+                .map(|b| b.to_string())
+                .unwrap_or_default();
+            let focusable = unsafe { element.CurrentIsKeyboardFocusable() }
+                .map(|b| b.as_bool())
+                .unwrap_or(false);
+            let mut patterns = Vec::new();
+            if unsafe {
+                element
+                    .GetCurrentPatternAs::<windows::Win32::UI::Accessibility::IUIAutomationValuePattern>(
+                        windows::Win32::UI::Accessibility::UIA_ValuePatternId,
+                    )
+            }
+            .is_ok()
+            {
+                patterns.push("value");
+            }
+            if unsafe {
+                element
+                    .GetCurrentPatternAs::<windows::Win32::UI::Accessibility::IUIAutomationTextPattern>(
+                        windows::Win32::UI::Accessibility::UIA_TextPatternId,
+                    )
+            }
+            .is_ok()
+            {
+                patterns.push("text");
+            }
+            if unsafe {
+                element
+                    .GetCurrentPatternAs::<windows::Win32::UI::Accessibility::IUIAutomationInvokePattern>(
+                        windows::Win32::UI::Accessibility::UIA_InvokePatternId,
+                    )
+            }
+            .is_ok()
+            {
+                patterns.push("invoke");
+            }
+            nodes.push(Node {
+                control,
+                class,
+                name,
+                focusable,
+                patterns: patterns.join(","),
+            });
+        }
+        nodes
     }
 
     /// 只把「文本 + 按钮」两类节点按树序摊平，再交给 `pick_quip` 判定。
@@ -261,6 +422,10 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     pub fn current_quip() -> Option<String> {
+        None
+    }
+
+    pub fn confirmation_visible() -> Option<bool> {
         None
     }
 }
