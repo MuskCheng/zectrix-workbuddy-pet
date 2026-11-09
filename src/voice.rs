@@ -54,6 +54,9 @@ pub struct Draft {
     pub expires_at: i64,
     /// 上次投递失败的原因。留着文本让人可以直接再按一次，不用重新说一遍。
     pub hint: Option<String>,
+    /// 录音开始时屏幕上正显示哪个会话。投给它的概率最高，
+    /// 而「已经是这个会话」就没必要再去唤起深链（那会抢焦点、动窗口）。
+    pub current: Option<String>,
 }
 
 impl Draft {
@@ -65,6 +68,7 @@ impl Draft {
             index: 0,
             expires_at: now + PREVIEW_SECS,
             hint: None,
+            current: None,
         }
     }
     pub fn target(&self) -> Option<&Target> {
@@ -331,6 +335,7 @@ mod imp {
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
     };
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
@@ -344,8 +349,9 @@ mod imp {
         VK_RETURN, VK_V,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextW, IsIconic, IsWindowVisible,
-        SetForegroundWindow, ShowWindow, SW_RESTORE,
+        EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW,
+        GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow,
+        SW_RESTORE,
     };
 
     const CF_UNICODETEXT: u32 = 13;
@@ -353,7 +359,8 @@ mod imp {
     pub fn deliver(text: &str, send: bool) -> Result<()> {
         // 先把窗口提到前台再找控件：渲染进程只在窗口被激活时才重建无障碍树，
         // 顺序反了会一直看到退化树（实测 0 个 Edit）。
-        let _ = focus_window();
+        // 只还原最小化的窗口，绝不改一个正常窗口的大小——见 `bring_to_front`。
+        focus_window()?;
         std::thread::sleep(std::time::Duration::from_millis(400));
         let (_automation, element) = composer()?;
         let mut focused = false;
@@ -537,14 +544,73 @@ mod imp {
         })
     }
 
-    #[allow(dead_code)]
     fn focus_window() -> Result<()> {
         let hwnd = find_window().ok_or_else(|| anyhow::anyhow!("没找到 WorkBuddy 窗口"))?;
-        unsafe {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            let _ = SetForegroundWindow(hwnd);
+        if unsafe { bring_to_front(hwnd) } {
+            return Ok(());
         }
-        Ok(())
+        // 抢不到前台就别往下按 Ctrl+V：键盘事件发给的是前台窗口，
+        // 那样文字会粘进用户正在看的别的程序里，比失败严重得多。
+        anyhow::bail!(
+            "没能把 WorkBuddy 切到前台，这次不粘贴（避免粘到别的窗口）；点一下窗口再按确认键"
+        )
+    }
+
+    /// 把窗口提到前台，**只在最小化时**还原大小。
+    ///
+    /// 之前无条件 `ShowWindow(SW_RESTORE)`：它对最大化的窗口同样生效，会把窗口
+    /// 拉回普通大小——用户看到的就是「一按确认，WorkBuddy 突然缩小」。
+    /// 窗口大小是用户自己的事，我们只需要它在前台。
+    ///
+    /// 判「在前台」用的是**同进程**而不是同一个 HWND：Electron 会有一组顶层窗口，
+    /// 前台那个未必就是主窗口，用 HWND 相等判断会误判成「没激活」然后再去抢焦点。
+    unsafe fn bring_to_front(hwnd: HWND) -> bool {
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            if focused_on(hwnd) {
+                return true;
+            }
+            let _ = SetForegroundWindow(hwnd);
+            if focused_on(hwnd) {
+                return true;
+            }
+            // Windows 的前台锁定：后台进程直接 SetForegroundWindow 会被忽略。
+            // 临时把本线程的输入队列挂到当前前台线程上，就能拿到许可。
+            let fg = GetForegroundWindow();
+            if fg.0.is_null() {
+                return false;
+            }
+            let mut pid = 0u32;
+            let fg_thread = GetWindowThreadProcessId(fg, Some(&mut pid));
+            let me = GetCurrentThreadId();
+            if fg_thread == 0 || fg_thread == me {
+                return false;
+            }
+            let _ = AttachThreadInput(me, fg_thread, true);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = AttachThreadInput(me, fg_thread, false);
+            focused_on(hwnd)
+        }
+    }
+
+    /// 前台窗口是否就是 WorkBuddy（按进程判，容许 Electron 的多个顶层窗口）。
+    unsafe fn focused_on(hwnd: HWND) -> bool {
+        unsafe {
+            let fg = GetForegroundWindow();
+            if fg == hwnd {
+                return true;
+            }
+            if fg.0.is_null() || hwnd.0.is_null() {
+                return false;
+            }
+            let mut a = 0u32;
+            let mut b = 0u32;
+            GetWindowThreadProcessId(fg, Some(&mut a));
+            GetWindowThreadProcessId(hwnd, Some(&mut b));
+            a != 0 && a == b
+        }
     }
 
     /// `mods` 依次按下（不松开），再敲 `key`，最后逆序松开。

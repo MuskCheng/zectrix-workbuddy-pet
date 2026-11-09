@@ -1286,12 +1286,18 @@ async fn transcribe_voice(asr: &mut Option<voice::Asr>, wav: &Path) -> Result<St
 async fn deliver_voice(draft: voice::Draft) -> Result<String> {
     let text = draft.text.clone();
     let target = draft.target().cloned();
-    let what = match &target {
-        Some(t) => format!("已粘贴到「{}」的输入框（未发送）", t.title),
-        None => "已粘贴到当前输入框（未发送）".to_string(),
+    // 目标就是当前显示的那个会话就不切：切会话要唤起深链，会抢焦点、动窗口，
+    // 而单会话场景压根不需要——之前「一按确认窗口就缩小」正是这类多余动作。
+    let need_switch = target
+        .as_ref()
+        .is_some_and(|t| draft.current.as_deref() != Some(t.session.as_str()));
+    let what = match (&target, need_switch) {
+        (Some(t), true) => format!("已粘贴到「{}」的输入框（未发送）", t.title),
+        (Some(_), false) => "已粘贴到当前会话的输入框（未发送）".to_string(),
+        (None, _) => "已粘贴到当前输入框（未发送）".to_string(),
     };
     tokio::task::spawn_blocking(move || -> Result<()> {
-        if let Some(t) = target {
+        if let Some(t) = target.filter(|_| need_switch) {
             voice::open_session(&t.session)?;
             // 深链切会话要时间：窗口起来、组件重建完再粘贴，否则粘到上一个会话里。
             std::thread::sleep(Duration::from_millis(800));
@@ -2138,6 +2144,7 @@ async fn cmd_run(args: &Args) -> Result<()> {
                                 // 默认选中屏幕上正在显示的那个会话：多数时候
                                 // 用户就是对着当前这轮在说话。
                                 if let Some(cur) = model.current(now()) {
+                                    d.current = Some(cur.event.task_id.clone());
                                     if let Some(i) = d
                                         .targets
                                         .iter()
