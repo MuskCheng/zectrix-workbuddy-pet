@@ -3,6 +3,36 @@
 把 WorkBuddy 的实时任务状态显示在 ZECTRIX Note 4 墨水屏上（400×300）。Windows 本机程序：只读本机会话文件、
 局域网直连设备，不上传数据、不写系统目录。
 
+- **v0.4.0 新增语音输入**：长按设备确认键说话，本机转写成文字，粘贴到你选中的会话输入框。
+- **四套宠物造型**：像素喵 / 金算喵 / 暴富喵 / 星际喵，设备上长按上/下就能换。
+- **状态跟随**：正在工作、等你确认、完成、空闲，都直接画在屏幕上，不刷手机。
+
+## 本版新功能：按住确认键说话
+
+设备麦克风只负责采集，**没有语音识别**；WorkBuddy 输入框也只收文字。所以音频传到电脑后由本机
+whisper 转写，再把文字粘贴进去——**音频不出本机，不走云端**。
+
+```
+长按确认键 1 秒 → 设备开始录音（顶部「正在聆听 / 松开结束」）
+   ↓ 松开
+「正在识别…」→ 本机转写
+   ↓
+确认页：识别文本 + 目标会话
+   ↑/↓ 短按 = 换会话     确认短按 = 粘贴到输入框（不发送）
+   20 秒不操作 = 丢弃
+```
+
+<img src="docs/voice.png" width="360" alt="语音投递确认页">
+
+四件事先说清楚：
+
+1. **只在设备被占用时可用**（有任务在跑）。录音只能由设备发起、且必须连着，任务结束交还设备后按键到不了程序。
+2. **只粘贴、不发送**。文字进输入框后还能改错字，自己按回车。
+3. **需要一次性装 Python + whisper**，见注意事项 8。没装也能用宠物，只是转不出字。
+4. 首次录音前多等 5～6 秒（载模型），之后每段 1 秒内出字。纯噪声/误触不会插入任何文字。
+
+## 四套造型
+
 <table>
   <tr>
     <td align="center"><img src="docs/skin-pixel.png" width="360" alt="像素喵"><br><b>像素喵</b> <code>pixel</code>（默认）<br>针织尖帽 · 光剑与圆盾</td>
@@ -15,7 +45,7 @@
 </table>
 
 *四套造型共用同一套骨架与六种状态表情，只换帽子、服装与道具。图中为 `preview --demo working` 的演示数据，
-原尺寸 400×300。切换见「命令速查」——也可以直接在设备上长按上/下键。*
+原尺寸 400×300。设备上长按上/下键循环切换，立即存盘；也可以用 `skin set` 指定。*
 
 ## ⚠️ 需要人工操作的注意事项
 
@@ -42,7 +72,6 @@
    & "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m pip install openai-whisper
    .\workbuddy-pet.exe voice doctor      # 应打印「模型 small 已就绪」
    ```
-   首次录音前要多等 5～6 秒（载模型），之后每段 1 秒内出字。
 
 ## 部署步骤
 
@@ -51,8 +80,8 @@
 **A. 直接下载（最快，无需编译）**
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.3.2-windows-x64.exe`。约 5.4 MB 静态链接单文件，不依赖 .NET、VC++ 运行库或 Rust 工具链。
-可选核对完整性：`(Get-FileHash .\workbuddy-pet-0.3.2-windows-x64.exe -Algorithm SHA256).Hash`，
+`workbuddy-pet-0.4.0-windows-x64.exe`。约 5.4 MB 静态链接单文件，不依赖 .NET、VC++ 运行库或 Rust 工具链。
+可选核对完整性：`(Get-FileHash .\workbuddy-pet-0.4.0-windows-x64.exe -Algorithm SHA256).Hash`，
 对比同页的 `SHA256SUMS.txt`。
 
 **B. 交给脚本（本机一键构建 + 部署）**
@@ -134,29 +163,36 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 直到你处理完；一轮答完（完成）后再守 5 分钟，没有新会话就交还设备
 （`--idle-grace 秒数` 可调，`0` 为立即交还）。墨水屏断电保留最后一帧，交还不会让画面消失。
 
+## 设备按键
+
+设备连着时有效（任务在跑、设备被占用）：
+
+| 手势 | 作用 |
+| --- | --- |
+| 短按 上 / 下 | 翻任务；语音确认页里则换目标会话 |
+| 短按 确认 | 回首页并恢复自动跟随；语音确认页里则粘贴文字 |
+| **长按 上 / 下** | 换宠物造型（四只循环，立即存盘） |
+| **长按 确认** | 开始录音，松开结束（固件行为） |
+
+任务交还设备后按键到不了程序，属正常。屏幕上正显示「待办通知」时，长按确认会被固件解释成
+「完成待办」而不是录音。
+
 ## 命令速查
 
 | 命令 | 用途 |
 | --- | --- |
 | `check --target <IP>` | 只核对设备，不推画面 |
 | `push [--demo <状态>] [--skin <id>]` | 推一帧当前画面；`--demo` 用演示数据 |
-| `preview [--demo <状态>] [--out 路径]` | 本地渲染 PNG，不连设备 |
+| `preview [--demo <状态>] [--skin <id>] [--out 路径]` | 本地渲染 PNG，不连设备 |
 | `autostart on [--target <IP>]` / `off` / `status` | 开启 / 关闭跟随、查看状态 |
-| `skin list` / `skin set <id>` / `skin current` | 换造型（见下） |
-| `voice doctor [--wav 路径]` | 检查语音转写环境，可顺带试转一段音频 |
+| `skin list` / `skin set <id>` / `skin current` | 查看 / 切换造型（守护下一帧生效） |
+| `voice doctor [--wav 路径]` | 检查语音环境，可顺带试转一段音频 |
+| `voice preview [--text 文本] [--out 路径]` | 本地渲染语音确认页，用于调版式 |
 | `sessions` | 列出可跟随的会话及推导状态（诊断） |
 | `run [--target <IP>]` / `watch` / `supervise` | 调试用：常驻推图 / 守护 / 看门狗 |
 
-**设备按键**（设备连着时有效）：短按上/下翻任务，短按确认回首页，**长按上/下换造型**（四只循环，立即存盘）。
-任务交还设备后按键到不了程序，属正常。
-
-**语音输入**（设备被占用时，即任务在跑）：**长按确认键**说话，松手结束 → 设备显示识别文本和「投给哪个会话」。
-此时短按上/下换会话、短按确认把文字**粘贴**到该会话输入框（不发送，回去自己改错字），20 秒不操作自动丢弃。
-
-<img src="docs/voice.png" width="360" alt="语音投递确认页">
-
-**造型**：`pixel` 像素喵（默认）｜`abacus` 金算喵｜`fortune` 暴富喵｜`astro` 星际喵。
-`skin set` 写进 `state.json`，守护下一帧生效，不用重启。也可以用 `--skin` 临时试看不落盘。
+**造型 id**：`pixel` 像素喵（默认）｜`abacus` 金算喵｜`fortune` 暴富喵｜`astro` 星际喵。
+`skin set` 写进 `state.json`，不用重启；`--skin` 只是临时试看，不落盘。
 
 ## 排错
 
@@ -167,10 +203,14 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 | 守护在跑、看门狗「已停止」 | 重跑 `autostart on`；hook 触发时也会补 |
 | 升级后功能没变 | 副本被旧进程占用导致沿用旧版：`autostart off` → 覆盖 exe → `autostart on`，再比对 SHA256 |
 | PowerShell 报「意外的标记」 | 带空格/引号的路径不能当命令，用 `& "完整路径\workbuddy-pet.exe"` 或先 `cd` |
+| 长按确认没反应 | 设备未被占用（任务已结束、已交还），或当前画面是待办通知（固件会当成完成待办） |
+| 录音后转不出字 | 跑 `voice doctor`：没装 Python / whisper 会直接报；首次录音需等 6 秒载模型 |
+| 文字粘到了别的窗口 | 投递要求 WorkBuddy 在前台，抢不到前台会放弃而不是硬粘。点一下 WorkBuddy 再按确认 |
 
 ## 数据与卸载
 
-设置、任务记录、日志都在 `%LOCALAPPDATA%\zectrix-workbuddy-pet\`（含 `state.json`、`watch.log`）。
+设置、任务记录、录音与日志都在 `%LOCALAPPDATA%\zectrix-workbuddy-pet\`（含 `state.json`、`watch.log`、
+`recordings\`）。
 
 ```powershell
 .\workbuddy-pet.exe autostart off   # 停看门狗与守护、删自启项（先停看门狗，否则它会把守护补回来）
