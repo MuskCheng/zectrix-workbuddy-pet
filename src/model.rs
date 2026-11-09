@@ -209,6 +209,10 @@ pub fn clean(s: &str, max: usize) -> String {
 }
 pub const TASKS_PER_PAGE: usize = 4;
 
+/// 主卡换人需要新任务领先这么多秒。两个会话并行时各自每几秒写一条记录，
+/// 时间差一直很小；只有对方确实领先一大截（自己长时间没动）才值得换屏。
+const FOCUS_HYSTERESIS: i64 = 120;
+
 impl Model {
     /// 重建一次派生的跟随缓存（沿用上游迁移语义）；外部 Agent 事件与设置保留。
     /// 版本 2：轮次 ID 改为时间戳格式（-u<ts>），旧的序号式 ID（-t<N>）全部作废，
@@ -405,6 +409,36 @@ impl Model {
         });
         tasks
     }
+    /// 自动跟随「该显示的那一条」：已经上屏的任务只要还活着就不换人。
+    ///
+    /// 两个会话并行时（比如这边在跑、另一个项目也在跑），每来一条新记录
+    /// `updated_at` 都会往后走，若每帧重算「最新的那个」，主卡就会几秒一换，
+    /// 水墨屏跟着反复刷新。这里只在当前这条结束、消失时才重新挑一条。
+    pub fn auto_focus(&mut self, now: i64) {
+        let active = self.running(now);
+        if active.is_empty() {
+            return;
+        }
+        let best = active
+            .iter()
+            .filter(|t| t.status() == Status::Working)
+            .max_by_key(|t| t.updated_at)
+            .or_else(|| active.iter().max_by_key(|t| t.updated_at));
+        let Some(best) = best else {
+            return;
+        };
+        if let Some(key) = &self.selected {
+            if let Some(cur) = active.iter().find(|t| &t.key() == key) {
+                // 只有新任务明显更「热」才换人：两个会话交替写记录时，
+                // 时间差只有几秒，换人就是来回闪屏。
+                if best.updated_at.saturating_sub(cur.updated_at) <= FOCUS_HYSTERESIS {
+                    return;
+                }
+            }
+        }
+        self.selected = Some(best.key());
+    }
+
     pub fn current(&self, now: i64) -> Option<Task> {
         if let Some(status) = self.demo {
             return Some(Task {
@@ -566,6 +600,39 @@ mod tests {
         // 直到有人处理或这一轮真正结束。
         assert!(m.running(2000).iter().all(|t| t.status() == Status::Waiting));
     }
+    #[test]
+    fn auto_focus_keeps_the_card_still_until_it_ends() {
+        // 两个会话并行时，谁写一条新记录谁就「最新」。如果每帧重算，主卡会
+        // 几秒一换、水墨屏被反复刷白；已经上屏的那条只要还在跑就不该换。
+        let mut m = Model::default();
+        m.settings.follow_enabled = true;
+        let mut a = ev(1, Status::Working);
+        a.task_id = "a".into();
+        a.thread_id = Some("ta".into());
+        m.apply(a, "workbuddy", 100).unwrap();
+        m.auto_focus(100);
+        assert_eq!(m.selected.as_deref(), Some("workbuddy:a"));
+
+        let mut b = ev(1, Status::Working);
+        b.task_id = "b".into();
+        b.thread_id = Some("tb".into());
+        m.apply(b, "workbuddy", 110).unwrap();
+        m.auto_focus(110);
+        assert_eq!(
+            m.current(110).unwrap().event.task_id,
+            "a",
+            "已经上屏的任务还在跑，不许因为别人更新就换"
+        );
+
+        // A 结束：主卡换到还在跑的 B。
+        let mut done = ev(2, Status::Done);
+        done.task_id = "a".into();
+        done.thread_id = Some("ta".into());
+        m.apply(done, "workbuddy", 120).unwrap();
+        m.auto_focus(120);
+        assert_eq!(m.current(120).unwrap().event.task_id, "b");
+    }
+
     #[test]
     fn a_live_task_beats_an_older_waiting_one() {
         // 实测：A 会话几分钟前弹过确认（后来已放行），B 会话正在跑；

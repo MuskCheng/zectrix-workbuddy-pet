@@ -911,6 +911,8 @@ fn scan_into(model: &mut Model, watcher: &mut Watcher) -> (Vec<TaskEvent>, bool)
             }
         }
     }
+    // 主卡跟着「已经显示的那条」走：两个会话并行时不来回抢屏。
+    model.auto_focus(tick);
     // 左下角的上下文占用跟着「当前展示的会话」走：切任务、对话变长都能反映出来。
     // 只在整数百分比变化时触发推送——每 1% 刷一次墨水屏已足够，再多就是闪。
     let now = now();
