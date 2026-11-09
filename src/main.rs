@@ -15,7 +15,7 @@ use workbuddy_pet::{
     raster::{self, Fonts},
     sound,
     sprite::Skin,
-    uia,
+    uia, voice,
     workbuddy::{open_readonly_db, Watcher},
 };
 use zectrix_sdk::{Device, ImageFormat};
@@ -812,8 +812,48 @@ impl Args {
     }
 }
 
-fn parse_status(value: &str) -> Result<Option<Status>> {
-    Ok(match value.trim().to_ascii_lowercase().as_str() {
+/// v0.4.0 实验：设备录音 → 本机转写 → 投递到 WorkBuddy 输入框。
+///
+/// - `voice probe`：定位输入框，只读，不动界面
+/// - `voice paste --text ... [--send]`：把文字贴进输入框（可选回车发送）
+/// - `voice say --wav ...`：对一个 WAV 跑转写（验证 ASR 命令是否可用）
+fn cmd_voice(args: &Args) -> Result<()> {
+    match args.get("arg0").unwrap_or("probe") {
+        "probe" => println!("{}", voice::probe()?),
+        "paste" => {
+            let text = args
+                .get("text")
+                .context("用法：voice paste --text \"要投递的文字\" [--send]")?;
+            voice::deliver(text, args.has("send"))?;
+            println!(
+                "已投递到输入框{}",
+                if args.has("send") {
+                    " 并回车发送"
+                } else {
+                    "（未发送）"
+                }
+            );
+        }
+        "windows" => {
+            for line in voice::list_windows() {
+                println!("{line}");
+            }
+        }
+        "say" => {
+            let wav = args
+                .get("wav")
+                .context("用法：voice say --wav 路径 [--asr 命令]")?;
+            let cmd = args.get("asr").unwrap_or(voice::DEFAULT_ASR);
+            println!("音频：{}", voice::describe_wav(Path::new(wav))?);
+            let text = voice::transcribe(cmd, Path::new(wav))?;
+            println!("识别结果：{text}");
+        }
+        other => anyhow::bail!("未知子命令 voice {other}，可用 probe / paste / say"),
+    }
+    Ok(())
+}
+
+fn parse_status(value: &str) -> Result<Option<Status>> {    Ok(match value.trim().to_ascii_lowercase().as_str() {
         "idle" | "none" | "off" => None,
         "working" | "work" => Some(Status::Working),
         "waiting" | "wait" => Some(Status::Waiting),
@@ -2183,6 +2223,30 @@ async fn main() {
         "init" | "setup" | "guide" => cmd_init(&args).await,
         "check" => cmd_check(&args).await,
         "sound" | "tone" => cmd_sound(&args).await,
+        "voice" | "say" => cmd_voice(&args),
+        "uia" | "tree" => {
+            // 诊断用：把 WorkBuddy 窗口的可访问性树打出来，定位输入框与发送按钮。
+            let nodes = uia::dump_nodes();
+            println!("共 {} 个节点（只列可聚焦 / 可编辑 / 按钮）", nodes.len());
+            for (i, n) in nodes.iter().enumerate() {
+                if !(n.focusable
+                    || n.patterns.contains("value")
+                    || n.patterns.contains("text")
+                    || matches!(n.control.as_str(), "Button" | "Edit" | "Document"))
+                {
+                    continue;
+                }
+                let name: String = n.name.chars().take(30).collect();
+                println!(
+                    "{i:>4} {:<9} focus={:<5} {:<10} class={:<18} name={name}",
+                    n.control,
+                    n.focusable,
+                    n.patterns,
+                    n.class.chars().take(18).collect::<String>()
+                );
+            }
+            Ok(())
+        }
         "quip" => {
             // 诊断用：看一眼此刻从 WorkBuddy 界面读到的花絮是什么。
             match uia::current_quip() {
