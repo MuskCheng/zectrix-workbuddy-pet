@@ -2537,6 +2537,16 @@ async fn main() {
         "check" => cmd_check(&args).await,
         "sound" | "tone" => cmd_sound(&args).await,
         "voice" | "say" => cmd_voice(&args),
+        // 诊断用：界面上此刻有没有确认卡（「允许 / 拒绝」按钮）。
+        // 这是「等你处理」判定的主信号，出问题先看这条。
+        "uia" | "tree" if args.get("arg0") == Some("confirm") => {
+            match uia::confirmation_visible() {
+                Some(true) => println!("界面上有确认卡（允许 + 拒绝 都在）"),
+                Some(false) => println!("界面上没有确认卡"),
+                None => println!("读不到界面（窗口不在前台 / 无障碍树没建起来）"),
+            }
+            Ok(())
+        }
         "uia" | "tree" => {
             // 诊断用：把 WorkBuddy 窗口的可访问性树打出来，定位输入框与发送按钮。
             let nodes = uia::dump_nodes();

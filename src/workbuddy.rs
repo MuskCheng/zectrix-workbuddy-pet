@@ -159,6 +159,9 @@ struct Cursor {
     /// 主进程在 main.log 里登记的待确认类型（question/permission），
     /// 与侧边栏「待确认」徽章同源；权限卡不写会话 JSONL，只有这里有信号。
     pending_kind: Option<String>,
+    /// 界面上有没有「允许 / 拒绝」这对按钮。`None` = 读不到（窗口不在、
+    /// 无障碍树没建起来），此时退回日志与会话记录的启发式。
+    confirm_visible: Option<bool>,
     cwd: String,
     /// 最近一条已消费记录的记录时间与序号，静默补报完成时用。
     seen_at: i64,
@@ -509,10 +512,7 @@ impl Cursor {
 
     fn status(&self, now: i64) -> Option<Status> {
         self.task.as_ref()?;
-        // 主进程登记的待确认（提问或权限卡）与侧边栏「待确认」徽章同源，
-        // 但只在会话里也有一条卡住的写入调用时才算；会话记录里卡住工具的
-        // 启发式是主判据。
-        if self.pending_corroborated() || self.needs_user(now) {
+        if self.waiting_visible(now) {
             return Some(Status::Waiting);
         }
         Some(match self.last {
@@ -520,6 +520,28 @@ impl Cursor {
             Last::AssistantStopped => Status::Stopped,
             _ => Status::Working,
         })
+    }
+
+    /// 此刻是否该报「等你处理」。
+    ///
+    /// 界面是唯一能一锤定音的信号：确认卡、提问卡在屏幕上时，一定摆着一组
+    /// 「允许 / 拒绝」按钮。日志分不开——WorkBuddy 对长时间运行的 Bash 也发
+    /// `pending kind=permission`；会话记录也分不开——等确认时工具没结果，
+    /// 命令在跑时同样没结果，两边都是一片空白。之前只靠这两样，结果要么
+    /// 误报（编译中被提示去点允许），要么漏报（真确认卡被当成正常在跑）。
+    fn waiting_visible(&self, now: i64) -> bool {
+        match self.confirm_visible {
+            Some(true) => true,
+            // 界面上明确没有卡：`pending` 和「写入工具卡住」都可能只是一次
+            // 误报（WorkBuddy 给长命令也发 pending，写大文件也会卡几十秒），
+            // 不再据此打扰；只有提问类工具没有卡仍算等——那是要人回答的。
+            Some(false) => self
+                .waiting
+                .values()
+                .any(|(name, _)| WAIT_TOOLS.contains(&name.as_str())),
+            // 读不到界面（窗口关着、树没建起来）：退回原来的启发式。
+            None => self.pending_corroborated() || self.needs_user(now),
+        }
     }
 
     /// `todo_write` 是这一轮唯一可核对的进度来源：清单由 Agent 自己写出，
@@ -789,6 +811,9 @@ pub struct Watcher {
     automations: HashSet<String>,
     /// 只看指定会话（stem）：调试与预览单会话状态用，正式运行不设。
     only: Option<String>,
+    /// 界面确认卡的缓存 `(采样时刻, 结果)`。UIA 一次要几十到几百毫秒，
+    /// 2 秒一次的扫描没必要每次都问。
+    confirm: Option<(i64, Option<bool>)>,
 }
 
 impl Watcher {
@@ -799,6 +824,7 @@ impl Watcher {
             notify: TaskNotify::default(),
             automations: HashSet::new(),
             only: None,
+            confirm: None,
         }
     }
 
@@ -874,6 +900,24 @@ impl Watcher {
     }
 
     /// 返回本轮新出现的状态事件；`at` 是记录时间（必要时回退到文件修改时间）。
+    /// 界面上有没有确认卡，6 秒内复用上一次结果。
+    fn confirm_visible(&mut self, now: i64) -> Option<bool> {
+        // 单测用的是临时目录里的假会话，窗口却是真的：一旦把真实界面的
+        // 「没有确认卡」灌进假会话，判定就被外部状态带偏了。测试里一律不探。
+        if cfg!(test) {
+            return None;
+        }
+        const TTL: i64 = 8;
+        if let Some((at, v)) = self.confirm {
+            if now.saturating_sub(at) < TTL {
+                return v;
+            }
+        }
+        let v = crate::uia::confirmation_visible();
+        self.confirm = Some((now, v));
+        v
+    }
+
     pub fn scan(&mut self) -> Result<Vec<(Event, i64)>> {
         let now = now_secs();
         // 定时任务会话集合：db 里登记过的整条忽略；已经跟上的游标也要退场，
@@ -898,6 +942,20 @@ impl Watcher {
         for (path, c) in self.cursors.iter_mut() {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             c.pending_kind = self.notify.kind_for(stem, c.seen_at);
+        }
+        // 界面确认卡：一次查询，所有会话共用。只在「某个会话可能正等着」时
+        // 才问——否则窗口不在前台时每轮都要白等一次 1.2 秒超时。
+        let maybe_waiting = self
+            .cursors
+            .values()
+            .any(|c| c.pending_kind.is_some() || !c.waiting.is_empty());
+        let confirm = if maybe_waiting {
+            self.confirm_visible(now)
+        } else {
+            None
+        };
+        for c in self.cursors.values_mut() {
+            c.confirm_visible = confirm;
         }
         let files = self.files()?;
         self.cursors
