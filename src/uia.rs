@@ -35,19 +35,6 @@ pub fn current_quip() -> Option<String> {
     imp::current_quip()
 }
 
-/// 界面上是否正摆着一张确认卡（有一组「允许 / 拒绝」按钮）。
-///
-/// 这是判断「是不是真在等人点确认」唯一可靠的信号：WorkBuddy 对**长时间
-/// 运行的 Bash** 也会发 `pending kind=permission`，而会话记录里「等确认」和
-/// 「命令在跑」都是一片空白，两者从数据上分不开；但从界面上分得开——确认卡
-/// 一定带一对允许/拒绝按钮。
-///
-/// 返回 `None` = 读不到（窗口不在、无障碍树没建起来），调用方要退回启发式，
-/// 不能当成「没有确认卡」。
-pub fn confirmation_visible() -> Option<bool> {
-    imp::confirmation_visible()
-}
-
 /// 可访问性树里节点的类别。只需要区分「文本」「按钮」和「其它」。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -213,78 +200,6 @@ mod imp {
         tx
     }
 
-    /// 确认卡查询通道：同样独占 COM 的常驻线程，避免每次重开 COM。
-    static CONFIRM: OnceLock<Sender<Sender<Option<bool>>>> = OnceLock::new();
-
-    pub fn confirmation_visible() -> Option<bool> {
-        let tx = CONFIRM.get_or_init(spawn_confirm).clone();
-        let (reply_tx, reply_rx) = mpsc::channel();
-        if tx.send(reply_tx).is_err() {
-            return None;
-        }
-        // 确认卡是「此刻在不在」的瞬时事实：等太久没意义，不如退回启发式。
-        reply_rx
-            .recv_timeout(Duration::from_millis(600))
-            .ok()
-            .flatten()
-    }
-
-    fn spawn_confirm() -> Sender<Sender<Option<bool>>> {
-        let (tx, rx) = mpsc::channel::<Sender<Option<bool>>>();
-        std::thread::Builder::new()
-            .name("uia-confirm".into())
-            .spawn(move || {
-                let automation: Option<IUIAutomation> = unsafe {
-                    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-                    CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()
-                };
-                for reply in rx {
-                    let value = match &automation {
-                        Some(a) => read_confirm(a),
-                        None => None,
-                    };
-                    let _ = reply.send(value);
-                }
-            })
-            .ok();
-        tx
-    }
-
-    /// 只扫按钮节点（比整棵树快得多），看有没有「允许 + 拒绝」这对组合。
-    fn read_confirm(automation: &IUIAutomation) -> Option<bool> {
-        let root = element_of_workbuddy(automation)?;
-        let condition = (unsafe {
-            automation.CreatePropertyCondition(
-                UIA_ControlTypePropertyId,
-                &VARIANT::from(UIA_ButtonControlTypeId.0),
-            )
-        })
-        .ok()?;
-        let found = (unsafe { root.FindAll(TreeScope_Descendants, &condition) }).ok()?;
-        let count = (unsafe { found.Length() }).ok()?;
-        // 树没建起来时按钮只剩个位数（实测退化树只有标题栏那几个）：
-        // 这种时候「没找到」不能当成「没有确认卡」，宁可退回启发式。
-        if count < 8 {
-            return None;
-        }
-        let mut names = Vec::with_capacity(count as usize);
-        for index in 0..count {
-            let Ok(element) = (unsafe { found.GetElement(index) }) else {
-                continue;
-            };
-            let Ok(name) = (unsafe { element.CurrentName() }) else {
-                continue;
-            };
-            names.push(name.to_string());
-        }
-        Some(looks_like_confirmation(&names))
-    }
-
-    /// 一组按钮文案里有没有「允许 + 拒绝」这对组合。纯函数，便于单测。
-    pub(super) fn looks_like_confirmation(names: &[String]) -> bool {
-        let has = |keys: &[&str]| names.iter().any(|n| keys.iter().any(|k| n.contains(k)));
-        has(&["允许", "Allow", "Approve"]) && has(&["拒绝", "Deny", "Reject"])
-    }
     fn spawn() -> mpsc::Sender<Sender<Option<String>>> {
         let (tx, rx) = mpsc::channel::<Sender<Option<String>>>();
         std::thread::Builder::new()
@@ -518,27 +433,6 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::{pick_quip, Kind};
-
-    /// 确认卡的识别规则：允许和拒绝必须同时在场。
-    /// 只看一个词会误报——侧边栏、设置页也可能出现「允许」。
-    #[test]
-    #[cfg(windows)]
-    fn confirmation_needs_both_allow_and_deny() {
-        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(super::imp::looks_like_confirmation(&names(&[
-            "允许一次",
-            "拒绝"
-        ])));
-        assert!(super::imp::looks_like_confirmation(&names(&["Allow", "Deny"])));
-        assert!(!super::imp::looks_like_confirmation(&names(&[
-            "允许一次"
-        ])));
-        assert!(!super::imp::looks_like_confirmation(&names(&["拒绝"])));
-        // 正常对话界面的按钮：不能因为出现过「允许」就判成确认卡。
-        assert!(!super::imp::looks_like_confirmation(&names(&[
-            "发送", "停止", "还原", "允许所有插件"
-        ])));
-    }
 
     fn text(name: &str) -> (Kind, String) {
         (Kind::Text, name.to_string())
