@@ -36,6 +36,10 @@ const WAIT_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 /// WorkBuddy 的权限请求不写会话 JSONL、日志里也无事件，只能这样从侧面推断。
 const PERM_CONFIRM_SECS: i64 = 10;
 
+/// `pending:` 通知的有效期。确认卡挂着时 WorkBuddy 大约每分钟重发一次，
+/// 不再重发就说明卡早散了（它不写「已解除」）。只用来判断「这张卡属于谁」。
+const PENDING_TTL: i64 = 180;
+
 /// 写入类调用「没有回执」最多当多久的等待：超过这个窗口还没结果，多半是用户
 /// 拒绝了、或调用被丢弃（实测有 Write 永久没有 function_call_result），不能
 /// 一直把整轮钉在等待态。提问类（AskUserQuestion）不受此限。
@@ -162,6 +166,11 @@ struct Cursor {
     /// 界面上有没有「允许 / 拒绝」这对按钮。`None` = 读不到（窗口不在、
     /// 无障碍树没建起来），此时退回日志与会话记录的启发式。
     confirm_visible: Option<bool>,
+    /// 界面上那张确认卡是不是这个会话的。
+    ///
+    /// 卡是全局一张，但等待状态必须是会话级的：不区分的话，历史会话会
+    /// 跟着一起变「等你处理」，屏幕上就会显示一个六天前的任务在等你点确认。
+    card_owner: bool,
     cwd: String,
     /// 最近一条已消费记录的记录时间与序号，静默补报完成时用。
     seen_at: i64,
@@ -531,7 +540,8 @@ impl Cursor {
     /// 误报（编译中被提示去点允许），要么漏报（真确认卡被当成正常在跑）。
     fn waiting_visible(&self, now: i64) -> bool {
         match self.confirm_visible {
-            Some(true) => true,
+            // 界面上有卡，但只有它所属的那个会话在等。
+            Some(true) => self.card_owner,
             // 界面上明确没有卡：`pending` 和「写入工具卡住」都可能只是一次
             // 误报（WorkBuddy 给长命令也发 pending，写大文件也会卡几十秒），
             // 不再据此打扰；只有提问类工具没有卡仍算等——那是要人回答的。
@@ -688,6 +698,9 @@ struct TaskNotify {
     offset: u64,
     /// 待确认会话：session id -> 登记内容。
     pending: HashMap<String, Pending>,
+    /// 最近一次登记的会话与时刻。界面上的确认卡同一时刻只有一张，
+    /// 必须知道它属于谁——否则「界面有卡」会让所有历史会话一起变成等待。
+    recent: Option<(String, i64)>,
 }
 
 /// 取日志行自带的 `"timestamp":"…"`（RFC3339），解析不出来就退回当前时间——
@@ -734,17 +747,29 @@ impl TaskNotify {
                 if let Some(id) = parse_session_id(rest) {
                     let kind = parse_kind(rest);
                     if !kind.is_empty() {
+                        self.recent = Some((id.clone(), at));
                         self.pending.insert(id, Pending { kind, at });
                     }
                 }
             } else if let Some(i) = line.find("[TaskNotify] completed: session=") {
                 let rest = &line[i + "[TaskNotify] completed: session=".len()..];
                 if let Some(id) = parse_session_id(rest) {
+                    if self.recent.as_ref().is_some_and(|(s, _)| s == &id) {
+                        self.recent = None;
+                    }
                     self.pending.remove(&id);
                 }
             }
             // 其余 TaskNotify 行（onEvent/show/auth guide）没有状态语义，忽略。
         }
+    }
+
+    /// 最近一次登记的待确认会话（未过期才算）。界面上的确认卡属于它。
+    fn recent_session(&self, now: i64) -> Option<&str> {
+        self.recent
+            .as_ref()
+            .filter(|(_, at)| now.saturating_sub(*at) <= PENDING_TTL)
+            .map(|(s, _)| s.as_str())
     }
 
     /// 这个会话此刻还该不该算「等你确认」。
@@ -914,6 +939,24 @@ impl Watcher {
             }
         }
         let v = crate::uia::confirmation_visible();
+        // 只在「结论变了」时打日志：确认卡是低频事件，写进日志才能事后复盘
+        // 到底是没认出来、还是认出来了没推上去。
+        let before = self.confirm.and_then(|(_, v)| v);
+        if v != before {
+            match v {
+                Some(true) => println!("[界面] 检测到确认卡"),
+                Some(false) => {
+                    if before == Some(true) {
+                        println!("[界面] 确认卡已消失");
+                    }
+                }
+                None => {
+                    if before.is_some() {
+                        println!("[界面] 读不到界面，等待判定退回日志推断");
+                    }
+                }
+            }
+        }
         self.confirm = Some((now, v));
         v
     }
@@ -943,19 +986,28 @@ impl Watcher {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             c.pending_kind = self.notify.kind_for(stem, c.seen_at);
         }
-        // 界面确认卡：一次查询，所有会话共用。只在「某个会话可能正等着」时
-        // 才问——否则窗口不在前台时每轮都要白等一次 1.2 秒超时。
-        let maybe_waiting = self
-            .cursors
-            .values()
-            .any(|c| c.pending_kind.is_some() || !c.waiting.is_empty());
-        let confirm = if maybe_waiting {
-            self.confirm_visible(now)
-        } else {
-            None
-        };
-        for c in self.cursors.values_mut() {
+        // 界面确认卡：一次查询，所有会话共用。
+        //
+        // 必须**无条件**查。之前用「某会话可能正等着」当开关，结果被自己的
+        // 信号挡住：确认卡弹出时 WorkBuddy 也在写会话记录，`kind_for` 会判
+        // 「通知之后有新记录 = 已放行」把 pending 清掉，waiting 里又没有 Bash
+        // 这类工具——两边都是空的，于是压根不去看界面，真确认卡就这样漏了。
+        // 代价是窗口不在时每 8 秒有一次 600ms 超时，换来判定不再靠猜。
+        let confirm = self.confirm_visible(now);
+        // 卡归谁：以 main.log 登记的会话为准；登记过期了（用户离开很久、
+        // WorkBuddy 停止重发通知）就退到「最近还在活动的那条」——一张卡
+        // 不可能同时属于六个历史会话。
+        let owner = self.notify.recent_session(now).map(|s| s.to_string()).or_else(|| {
+            self.cursors
+                .iter()
+                .filter(|(_, c)| now.saturating_sub(c.seen_at) < 300)
+                .max_by_key(|(_, c)| c.seen_at)
+                .and_then(|(p, _)| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+        });
+        for (path, c) in self.cursors.iter_mut() {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
             c.confirm_visible = confirm;
+            c.card_owner = matches!((owner.as_deref(), confirm), (Some(s), Some(true)) if s == stem);
         }
         let files = self.files()?;
         self.cursors
