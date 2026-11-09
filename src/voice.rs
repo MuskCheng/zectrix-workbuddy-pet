@@ -132,9 +132,13 @@ pub fn describe_wav(path: &Path) -> Result<String> {
     Ok(format!("{rate} Hz / {channels} 声道 / {bits} bit / {secs:.2} 秒"))
 }
 
-/// 默认模型。small 在 4 GB 显存的 3050 Ti 上跑 10 秒语音约 0.6 秒，
-/// 中文准确率够日常指令；想更准可以换成 medium（慢 2～3 倍）。
-pub const DEFAULT_MODEL: &str = "small";
+/// 默认模型。`large-v3-turbo` 是 large-v3 的蒸馏版，中文比 small 明显准，
+/// 4 GB 显存的 3050 Ti 跑得动；首次要下载约 1.5 GB（之后本地加载几秒）。
+///
+/// 想更快或显存更紧可以用 `small`/`medium`，worker 也接受 `Systran/...` 这类
+/// HF 仓库名。装了 faster-whisper 时走 CTranslate2（快 4～8 倍 + VAD + 热词），
+/// 没装则自动回退 openai-whisper。
+pub const DEFAULT_MODEL: &str = "large-v3-turbo";
 
 /// 常驻转写进程：加载一次模型，之后每段音频只花推理时间。
 ///
@@ -187,8 +191,8 @@ impl Asr {
             lines,
             model: model.to_string(),
         };
-        // 首次要载模型（small 约 1～3 秒，含 import torch 更久），给足时间。
-        match asr.next_json(std::time::Duration::from_secs(120)) {
+        // 首次要载模型；用 turbo 时还可能是第一次下载（1.5 GB），给足时间。
+        match asr.next_json(std::time::Duration::from_secs(300)) {
             Ok(v) if v["ready"].as_bool() == Some(true) => Ok(asr),
             Ok(v) => anyhow::bail!(
                 "{}",
@@ -317,6 +321,14 @@ pub fn probe() -> Result<String> {
     imp::probe()
 }
 
+/// 诊断：只把窗口抢到前台并报告前后结果，不写任何文字。
+///
+/// 用来验证「双屏 / 焦点在别的程序」时到底能不能激活——比直接粘贴安全，
+/// 不会在输入框里留测试文字。
+pub fn focus_probe() -> Result<String> {
+    imp::focus_probe()
+}
+
 /// 诊断：列出所有 Chromium 顶层窗口。
 pub fn list_windows() -> Vec<String> {
     imp::list_windows()
@@ -330,7 +342,7 @@ pub fn open_session(session: &str) -> Result<()> {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use windows::core::VARIANT;
+    use windows::core::{VARIANT, BSTR};
     use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -341,38 +353,55 @@ mod imp {
     };
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::Accessibility::{
-        CUIAutomation, IUIAutomation, IUIAutomationElement, TreeScope_Descendants,
-        UIA_ControlTypePropertyId, UIA_EditControlTypeId,
+        CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationValuePattern,
+        TreeScope_Descendants, UIA_ControlTypePropertyId, UIA_EditControlTypeId, UIA_ValuePatternId,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL,
-        VK_RETURN, VK_V,
+        VK_MENU, VK_RETURN, VK_V,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowTextW,
-        GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow, ShowWindow,
-        SW_RESTORE,
+        BringWindowToTop, EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowRect,
+        GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
+        ShowWindow, SwitchToThisWindow, SW_RESTORE,
     };
 
     const CF_UNICODETEXT: u32 = 13;
 
     pub fn deliver(text: &str, send: bool) -> Result<()> {
-        // 先把窗口提到前台再找控件：渲染进程只在窗口被激活时才重建无障碍树，
-        // 顺序反了会一直看到退化树（实测 0 个 Edit）。
-        // 只还原最小化的窗口，绝不改一个正常窗口的大小——见 `bring_to_front`。
-        focus_window()?;
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        // 先找输入框：它不需要窗口在前台（树建好就能读），而且抢前台失败时
+        // 还要靠它做最后一道写入。反过来（先抢前台再找）会在抢不到时连
+        // 兜底的机会都没有。
         let (_automation, element) = composer()?;
+        let front = focus_window();
+
+        // SetFocus 本身也会尽量激活宿主窗口，是「抢前台」的第二条路。
+        // 只有真的拿到键盘焦点才允许按 Ctrl+V——否则会粘到别的程序里。
         let mut focused = false;
-        for _ in 0..5 {
+        for _ in 0..6 {
             if unsafe { element.SetFocus() }.is_ok() {
                 focused = true;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(120));
         }
-        if !focused {
-            anyhow::bail!("输入框聚焦失败（窗口可能不在前台），请手动点一下输入框再试");
+        let keyboard_ready = focused
+            && unsafe { element.CurrentHasKeyboardFocus() }
+                .map(|v| v.as_bool())
+                .unwrap_or(false);
+
+        if !keyboard_ready {
+            if let Err(front_err) = front {
+                // 完全不依赖焦点的最后一条路：直接写输入框的 Value。
+                // 只在框为空时写，绝不覆盖用户已经打好的草稿。
+                return match write_value(&element, text) {
+                    Ok(()) => Ok(()),
+                    Err(write_err) => anyhow::bail!("{front_err}；{write_err}"),
+                };
+            }
+            anyhow::bail!(
+                "输入框没拿到键盘焦点，这次不粘贴（避免粘到别的窗口）；点一下窗口再按确认键"
+            );
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
         set_clipboard(text).context("写剪贴板失败（可能有别的程序正占着剪贴板）")?;
@@ -382,6 +411,41 @@ mod imp {
             key_combo(&[], VK_RETURN).context("发送回车失败")?;
         }
         Ok(())
+    }
+
+    /// 直接把文字写进输入框的 Value，不需要窗口在前台、也不碰剪贴板。
+    ///
+    /// 这是「双屏 + 焦点在别的程序」时的兜底：Windows 的前台锁定让后台进程
+    /// 抢不到焦点，但 UIA 的 ValuePattern 仍然能写。两个约束：
+    /// - 输入框必须为空。ValuePattern 是整体替换，不覆盖用户草稿。
+    /// - 写完读回比对，Electron 的受控输入框不认这次写入时能立刻发现。
+    fn write_value(element: &IUIAutomationElement, text: &str) -> Result<()> {
+        unsafe {
+            let pattern: IUIAutomationValuePattern = element
+                .GetCurrentPatternAs(UIA_ValuePatternId)
+                .context("输入框不支持 ValuePattern")?;
+            let current = pattern
+                .CurrentValue()
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            if !current.trim().is_empty() {
+                anyhow::bail!(
+                    "输入框里已有 {} 个字，为免覆盖没有写入；点一下窗口再按确认键",
+                    current.chars().count()
+                );
+            }
+            pattern
+                .SetValue(&BSTR::from(text))
+                .context("写入输入框被拒绝")?;
+            let after = pattern
+                .CurrentValue()
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            if after.trim() != text.trim() {
+                anyhow::bail!("输入框没有接受这次写入（界面可能不允许直接设值）");
+            }
+            Ok(())
+        }
     }
 
     pub fn probe() -> Result<String> {
@@ -395,6 +459,34 @@ mod imp {
             Err(e) => out.push_str(&format!("输入框：定位失败——{e}")),
         }
         Ok(out)
+    }
+
+    pub fn focus_probe() -> Result<String> {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let hwnd = find_window().ok_or_else(|| anyhow::anyhow!("没找到 WorkBuddy 窗口"))?;
+            let before = foreground_desc();
+            let ok = bring_to_front(hwnd);
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let after = foreground_desc();
+            Ok(format!(
+                "抢前台：{}\n之前：{before}\n之后：{after}",
+                if ok { "成功" } else { "失败" }
+            ))
+        }
+    }
+
+    fn foreground_desc() -> String {
+        unsafe {
+            let fg = GetForegroundWindow();
+            if fg.0.is_null() {
+                return "（没有前台窗口）".into();
+            }
+            let mut class = [0u16; 256];
+            let len = GetClassNameW(fg, &mut class);
+            let class = String::from_utf16_lossy(&class[..len.max(0) as usize]);
+            format!("{class} title={:?}", window_title(fg))
+        }
     }
 
     pub fn open_session(session: &str) -> Result<()> {
@@ -564,35 +656,70 @@ mod imp {
     ///
     /// 判「在前台」用的是**同进程**而不是同一个 HWND：Electron 会有一组顶层窗口，
     /// 前台那个未必就是主窗口，用 HWND 相等判断会误判成「没激活」然后再去抢焦点。
+    ///
+    /// 抢不到焦点是常态而不是异常：守护是后台进程，Windows 有前台锁定，
+    /// 而 `AttachThreadInput` 在没有消息循环的线程上会直接失败（以前忽略返回值，
+    /// 于是「副屏 + 焦点在别的程序」时必然失败）。现在按代价从低到高试四条路，
+    /// 任何一条成功就停。
     unsafe fn bring_to_front(hwnd: HWND) -> bool {
         unsafe {
             if IsIconic(hwnd).as_bool() {
                 let _ = ShowWindow(hwnd, SW_RESTORE);
             }
-            if focused_on(hwnd) {
-                return true;
+            for _ in 0..3 {
+                if focused_on(hwnd) {
+                    return true;
+                }
+                let _ = SetForegroundWindow(hwnd);
+                if focused_on(hwnd) {
+                    return true;
+                }
+
+                // 模拟一次 Alt：系统会认为「刚有用户输入」，前台锁定随之放开。
+                // 这是自动化工具里最常用的一招，副作用只是可能点亮菜单栏。
+                press_alt();
+                let _ = BringWindowToTop(hwnd);
+                let _ = SetForegroundWindow(hwnd);
+                if focused_on(hwnd) {
+                    return true;
+                }
+
+                // 附加到当前前台线程的输入队列再抢。必须看返回值：后台线程
+                // 没有消息循环时这一步会失败，失败就不要再浪费时间。
+                let fg = GetForegroundWindow();
+                if !fg.0.is_null() {
+                    let mut pid = 0u32;
+                    let fg_thread = GetWindowThreadProcessId(fg, Some(&mut pid));
+                    let me = GetCurrentThreadId();
+                    if fg_thread != 0
+                        && fg_thread != me
+                        && AttachThreadInput(me, fg_thread, true).as_bool()
+                    {
+                        let _ = BringWindowToTop(hwnd);
+                        let _ = SetForegroundWindow(hwnd);
+                        let _ = AttachThreadInput(me, fg_thread, false);
+                        if focused_on(hwnd) {
+                            return true;
+                        }
+                    }
+                }
+
+                // 未文档化，但对「后台进程激活自己的窗口」有效，放最后。
+                SwitchToThisWindow(hwnd, true);
+                if focused_on(hwnd) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
             }
-            let _ = SetForegroundWindow(hwnd);
-            if focused_on(hwnd) {
-                return true;
-            }
-            // Windows 的前台锁定：后台进程直接 SetForegroundWindow 会被忽略。
-            // 临时把本线程的输入队列挂到当前前台线程上，就能拿到许可。
-            let fg = GetForegroundWindow();
-            if fg.0.is_null() {
-                return false;
-            }
-            let mut pid = 0u32;
-            let fg_thread = GetWindowThreadProcessId(fg, Some(&mut pid));
-            let me = GetCurrentThreadId();
-            if fg_thread == 0 || fg_thread == me {
-                return false;
-            }
-            let _ = AttachThreadInput(me, fg_thread, true);
-            let _ = SetForegroundWindow(hwnd);
-            let _ = AttachThreadInput(me, fg_thread, false);
-            focused_on(hwnd)
+            false
         }
+    }
+
+    /// 单独按一下 Alt（按下 + 松开），用来解除 Windows 的前台锁定。
+    fn press_alt() {
+        let inputs = [key_input(VK_MENU, false), key_input(VK_MENU, true)];
+        let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+        let _ = sent;
     }
 
     /// 前台窗口是否就是 WorkBuddy（按进程判，容许 Electron 的多个顶层窗口）。
@@ -688,6 +815,10 @@ mod imp {
 
     pub fn list_windows() -> Vec<String> {
         vec![]
+    }
+
+    pub fn focus_probe() -> Result<String> {
+        anyhow::bail!("语音投递目前只支持 Windows")
     }
 
     pub fn open_session(_session: &str) -> Result<()> {

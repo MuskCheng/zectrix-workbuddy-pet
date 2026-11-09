@@ -37,7 +37,7 @@ whisper 转写，再把文字粘贴进去——**音频不出本机，不走云�
 1. **只在设备被占用时可用**（有任务在跑）。录音只能由设备发起、且必须连着，任务结束交还设备后按键到不了程序。
 2. **只粘贴、不发送**。文字进输入框后还能改错字，自己按回车。
 3. **需要一次性装 Python + whisper**，见注意事项 8。没装也能用宠物，只是转不出字。
-4. 首次录音前多等 5～6 秒（载模型），之后每段 1 秒内出字。纯噪声/误触不会插入任何文字。
+4. 首次要载模型（turbo 首次还要下载约 1.5 GB），之后每段 1 秒内出字。纯噪声/误触不会插入任何文字。
 
 ## 四套造型
 
@@ -72,14 +72,17 @@ whisper 转写，再把文字粘贴进去——**音频不出本机，不走云�
 7. **升级要先停再换**：`autostart off` → 覆盖 exe → `autostart on`。直接 `autostart on` 也会尝试热替换，
    但旧进程仍占用副本文件时会**静默沿用旧版**，看起来升级成功其实没换。
 8. **语音输入要自己装 Python（可选）**：设备录音只是音频，转文字发生在本机，
-   需要 Python 3.12 + `openai-whisper`。不装也能正常用，只是长按确认键录音后转不出字。
-   一次性装好（GPU 版 torch 约 2 GB，CPU 版慢 3～5 倍）：
+   需要 Python 3.12 + `faster-whisper`（装不上时自动回退 `openai-whisper`）。
+   不装也能正常用，只是长按确认键录音后转不出字。一次性装好：
    ```powershell
    winget install --id Python.Python.3.12 -e
-   & "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m pip install torch --index-url https://download.pytorch.org/whl/cu121
-   & "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m pip install openai-whisper
-   .\workbuddy-pet.exe voice doctor      # 应打印「模型 small 已就绪」
+   $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
+   & $py -m pip install faster-whisper     # 推荐：快 4～8 倍，自带 VAD 与热词
+   & $py -m pip install openai-whisper     # 可选：faster-whisper 缺失时的回退
+   .\workbuddy-pet.exe voice doctor        # 首次会下载 large-v3-turbo（约 1.5 GB）
    ```
+   模型默认 `large-v3-turbo`（中文明显好于 small）。GPU 走 CUDA fp16，显存不够或
+   cuDNN 不匹配时自动退 CPU int8，短句仍能在 1 秒内出字。
 
 ## 部署步骤
 
@@ -88,8 +91,8 @@ whisper 转写，再把文字粘贴进去——**音频不出本机，不走云�
 **A. 直接下载（最快，无需编译）**
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.4.0-windows-x64.exe`。约 5.4 MB 静态链接单文件，不依赖 .NET、VC++ 运行库或 Rust 工具链。
-可选核对完整性：`(Get-FileHash .\workbuddy-pet-0.4.0-windows-x64.exe -Algorithm SHA256).Hash`，
+`workbuddy-pet-0.4.1-windows-x64.exe`。约 5.4 MB 静态链接单文件，不依赖 .NET、VC++ 运行库或 Rust 工具链。
+可选核对完整性：`(Get-FileHash .\workbuddy-pet-0.4.1-windows-x64.exe -Algorithm SHA256).Hash`，
 对比同页的 `SHA256SUMS.txt`。
 
 **B. 交给脚本（本机一键构建 + 部署）**

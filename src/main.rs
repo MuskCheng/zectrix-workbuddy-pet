@@ -839,6 +839,7 @@ fn cmd_voice(args: &Args) -> Result<()> {
                 println!("{line}");
             }
         }
+        "focus" => println!("{}", voice::focus_probe()?),
         // 环境自检：转写跑不起来时先看这条，能一次说清是缺解释器、
         // 缺脚本、还是缺模型（以及要等多久）。
         "doctor" => {
