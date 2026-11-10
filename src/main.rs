@@ -208,22 +208,60 @@ fn pid_is_ours(_pid: u32) -> bool {
     false
 }
 
-/// 抢占单实例锁：锁里记着真正在跑的那份的 PID。
-/// 上一份是崩溃退出的（PID 已消失）就接管，避免 watch.cmd 重启时被自己的
-/// 旧锁挡在门外；真有两份同时活着则后来者退出。
-fn claim_instance() -> bool {
-    if let Ok(text) = std::fs::read_to_string(lock_path()) {
-        if let Some((pid, _)) = parse_heartbeat(&text) {
-            if pid != std::process::id() && pid_is_ours(pid) {
-                return false;
-            }
-        }
-    }
+/// 把锁写盘：`autostart off` 和状态查询靠它找 PID。互斥体本身不依赖这个文件。
+fn write_lock_file() {
     let _ = std::fs::write(
         lock_path(),
         format!("{}\n{}", std::process::id(), now()),
     );
-    true
+}
+
+/// 抢占单实例锁：同一时刻只允许一份守护连设备。
+///
+/// Windows 上必须用内核互斥体，不能「读 lock → 写 lock」：`ensure` 拉起守护的
+/// 同一秒，看门狗的第一拍也可能拉起一份，两个进程都读到空 lock、都写、都往下跑。
+/// 两份守护共用一台设备时只能互相抢连接——设备端看到的是「连上又断开」，
+/// 日志里是刷不完的「设备忙碌」。互斥体由内核保证唯一，进程退出自动释放，
+/// 也就不存在陈旧锁把重启挡在门外的问题。
+fn claim_instance() -> bool {
+    #[cfg(windows)]
+    {
+        use windows::core::w;
+        use windows::Win32::Foundation::{CloseHandle, GetLastError, BOOL, ERROR_ALREADY_EXISTS};
+        use windows::Win32::System::Threading::CreateMutexW;
+
+        // 句柄要活到进程结束：存静态变量，不 CloseHandle。
+        static HELD: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+        if HELD.get().is_some() {
+            return true;
+        }
+        let Ok(handle) = (unsafe {
+            CreateMutexW(None, BOOL(1), w!("Local\\zectrix-workbuddy-pet-daemon"))
+        }) else {
+            return false;
+        };
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return false;
+        }
+        let _ = HELD.set(handle.0 as isize);
+        write_lock_file();
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(text) = std::fs::read_to_string(lock_path()) {
+            if let Some((pid, _)) = parse_heartbeat(&text) {
+                if pid != std::process::id() && pid_is_ours(pid) {
+                    return false;
+                }
+            }
+        }
+        write_lock_file();
+        true
+    }
 }
 
 /// 结束某个 PID（`autostart off` 用）。仅当它确实是本程序才动手，

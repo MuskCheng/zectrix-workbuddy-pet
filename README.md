@@ -92,8 +92,8 @@ whisper 转写，再把文字粘贴进去——**音频不出本机，不走云�
 **A. 直接下载（最快，无需编译）**
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.4.2-windows-x64.exe`。约 5.4 MB 静态链接单文件，不依赖 .NET、VC++ 运行库或 Rust 工具链。
-可选核对完整性：`(Get-FileHash .\workbuddy-pet-0.4.2-windows-x64.exe -Algorithm SHA256).Hash`，
+`workbuddy-pet-0.4.3-windows-x64.exe`。约 5.4 MB 静态链接单文件，不依赖 .NET、VC++ 运行库或 Rust 工具链。
+可选核对完整性：`(Get-FileHash .\workbuddy-pet-0.4.3-windows-x64.exe -Algorithm SHA256).Hash`，
 对比同页的 `SHA256SUMS.txt`。
 
 **B. 交给脚本（本机一键构建 + 部署）**
