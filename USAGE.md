@@ -296,6 +296,35 @@ Agent 提问或权限确认卡在等时，设备显示**题干 + 一条框起来
 
 ## 启动 / 停止 / 卸载 / 更新
 
+### 计划任务（v0.4.4 起）
+
+`autostart on` 除了写启动文件夹，还会注册一个计划任务 `zectrix-workbuddy-pet`：
+
+| 项 | 值 |
+|---|---|
+| 动作 | `<安装目录>\bin\workbuddy-pet.exe supervise` |
+| 触发 | 每分钟一次 |
+| 多实例策略 | 默认 `IgnoreNew`——看门狗已经在跑时，这次触发直接被丢弃，不创建进程 |
+
+**为什么要多这一个任务**：WorkBuddy 执行 UserPromptSubmit hook 时会把它派生的进程放进
+一个作业对象（job object），回合结束就整组终止。hook 里跑的 `ensure` 如果直接拉起看门狗，
+这份看门狗就活不过一个回合——日志里没有收尾、没有 panic、没有崩溃转储，只有「守护每隔
+几分钟消失一次」。由任务计划服务创建进程则不会：父进程是 `svchost`，不属于那个 job。
+恢复窗口因此是 1 分钟（触发间隔），而平时不产生任何额外进程。
+
+`ensure` 在被 job 包住时会主动让位，不再拉一份短命的看门狗去占位。判断依据是两个：
+`task.installed` 标记文件（注册成功才写）、以及 `IsProcessInJob` 的返回值。
+
+停止与卸载时 `autostart off` 会 `schtasks /end` + `/delete` 并删掉标记；手工清也可以：
+
+```powershell
+schtasks /delete /tn zectrix-workbuddy-pet /f
+```
+
+`autostart on` 里的这条 `schtasks` 调用是唯一需要外部程序的一步。如果所在环境禁止调用
+`schtasks`（企业策略、或某些终端沙箱），会打印注册失败，此时仍能用，只是回到旧行为：
+守护会被 WorkBuddy 的回合清理，由下一次 hook 补。
+
 - **启动**：`workbuddy-pet watch`（前台跟随，可配 `autostart on` 常驻）；临时用一次就
   `workbuddy-pet run`。
 - **停止**：前台 `Ctrl+C`——向设备发送 `close()`、保存状态后退出，不自动重连。

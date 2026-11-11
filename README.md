@@ -4,7 +4,7 @@
 
 Windows 本机小工具，只读本机会话文件，局域网直连设备。不上传数据，不写系统目录，不需要账号。
 
-`Windows 10 / 11 x64` · `v0.4.3` · `MIT` · 单文件 5.4 MB，无 .NET / VC++ / Rust 运行时依赖
+`Windows 10 / 11 x64` · `v0.4.4` · `MIT` · 单文件 5.4 MB，无 .NET / VC++ / Rust 运行时依赖
 
 <p align="center">
   <img src="docs/skin-pixel.png" width="420" alt="设备上的一帧：正在工作">
@@ -39,7 +39,7 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
 没开这条，设备空闲约 2 分钟就下线，推送一定失败。
 
 ```powershell
-# 1. 下载 workbuddy-pet-0.4.3-windows-x64.exe 后，先核对设备通不通
+# 1. 下载 workbuddy-pet-0.4.4-windows-x64.exe 后，先核对设备通不通
 .\workbuddy-pet.exe check --target <设备IP>
 
 # 2. 推一帧看看版式（check 刚断开，固件要 8 秒才释放连接）
@@ -192,12 +192,12 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 ### 方式 A：直接下载（最快）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.4.3-windows-x64.exe`，约 5.4 MB，静态链接单文件。
+`workbuddy-pet-0.4.4-windows-x64.exe`，约 5.4 MB，静态链接单文件。
 
 可选核对完整性：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.4.3-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.4.4-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 与同页 `SHA256SUMS.txt` 对比。然后回到[快速开始](#快速开始)。
@@ -259,8 +259,10 @@ cargo build --locked --release      # 产物 target\release\workbuddy-pet.exe
 2. **记下设备 IP**（同一页面显示），上文 `<IP>` 一律替换成它。IP 变了要重跑 `autostart on --target <新IP>`。
 3. **设备同时只允许一个连接**：断开后固件约 8 秒才释放租约。两条命令连着跑会报「设备忙碌」，隔 8 秒重试即可。
    守护运行期间手动 `check` / `push` 必然报忙碌，这是正常的（连接被守护占着），不是故障。
-4. **守护只允许一份**。`autostart on` 与 `ensure` 都幂等，重复执行不会多起进程；0.4.3 起用命名互斥体保证，
-   第二份会打印「已有守护在跑」后退出。若在旧版看到两个 `watch`，就是本节说的双开，升级即可。
+4. **守护只允许一份，而且得由计划任务托管**。0.4.3 起用命名互斥体保证单实例，重复执行 `autostart on`
+   或 `ensure` 不会多起进程。0.4.4 起 `autostart on` 会额外注册计划任务 `zectrix-workbuddy-pet`
+   （每分钟触发一次 `supervise`，已在跑则忽略）。少了这个任务，被 WorkBuddy hook 拉起来的守护
+   活不过一个回合——它会跟着 hook 的作业对象一起被清理，日志里没有任何收尾。
 5. **升级要先停再换**：`autostart off` → 覆盖 exe → `autostart on`。直接 `autostart on` 也会尝试热替换，
    但旧进程仍占用副本文件时会**静默沿用旧版**，看起来升级成功其实没换。
 6. **支持范围**：Windows 10/11 **x64**；设备仅 Note 4（`zectrix-s3-epaper-4.2`，400×300），**不支持 Note 4C**；
@@ -293,6 +295,7 @@ cargo build --locked --release      # 产物 target\release\workbuddy-pet.exe
 | 长按确认没反应 | 设备未被占用（任务已结束、已交还），或当前画面是待办通知（固件会当成完成待办） |
 | 录音后转不出字 | 跑 `voice doctor`：没装 Python / whisper 会直接报；首次录音需等约 6 秒载模型 |
 | 文字粘到了别的窗口 | 投递要求 WorkBuddy 在前台，抢不到前台会放弃而不是硬粘。点一下 WorkBuddy 再按确认 |
+| 日志每隔几分钟就「守护进程启动」，且没有「已断开并保存状态」 | 进程被 WorkBuddy 的 hook 作业对象清理了。看 `autostart status` 的「计划任务」是否为已注册，未注册就重跑 `autostart on` |
 | 设备停在旧画面 | 系统通知会临时覆盖约 12 秒；`push` 打印「已推送」即设备报告显示完成 |
 
 ## 数据与卸载

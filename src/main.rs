@@ -335,9 +335,88 @@ fn detach(cmd: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW 不弹黑框；DETACHED_PROCESS 让子进程不随当前控制台/父进程退出。
+        // CREATE_NO_WINDOW 不弹黑框；DETACHED_PROCESS 让它不随当前控制台退出。
+        // 注意这两个标志**不能**让它脱离作业对象（job）：`ensure` 被 WorkBuddy 的
+        // hook 调用时，子进程会跟着进同一个 job，回合结束 job 关闭就被一起清掉，
+        // 日志里连一句收尾都没有。真要脱离，得让服务进程代为创建（见 `task_register`）。
         cmd.creation_flags(0x0800_0000 | 0x0000_0008);
     }
+}
+
+/// 承载看门狗的计划任务名。
+#[cfg(windows)]
+const TASK_NAME: &str = "zectrix-workbuddy-pet";
+
+/// 任务注册成功后落的标记。判断「有没有装过任务」只读这个文件，不再去调
+/// `schtasks /query`：那个调用在受限环境里会被安全策略拦掉，连调用者一起终止，
+/// 一个读状态的动作不该有这种副作用。
+fn task_marker() -> PathBuf {
+    data_dir().join("task.installed")
+}
+
+fn task_installed() -> bool {
+    task_marker().is_file()
+}
+
+/// 调 `schtasks`，不弹窗。返回原始输出，由调用方判断成败。
+#[cfg(windows)]
+fn schtasks(args: &[&str]) -> std::io::Result<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("schtasks")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .output()
+}
+
+/// 注册计划任务：每分钟触发一次 `supervise`。
+///
+/// 触发频率选 1 分钟，是因为它同时承担「首次启动」和「被杀后自愈」两件事，
+/// 而 Task Scheduler 默认的多实例策略是 IgnoreNew——看门狗已经在跑时，
+/// 这一分钟的触发**不会**再创建进程，只有它不在了才会起一份。
+/// 恢复窗口因此是 1 分钟，代价接近零。
+///
+/// 关键在于：任务由任务计划服务（svchost）创建进程，父进程不是调用方，
+/// 不继承 WorkBuddy 给 hook 的那个作业对象。直接 `spawn` 的看门狗会被
+/// 回合结束时的 job 清理连带杀掉——日志里连一句收尾都没有，这正是
+/// 「守护每隔几分钟消失一次」的根因。
+#[cfg(windows)]
+fn task_register(exe: &Path) -> Result<()> {
+    let tr = format!("\"{}\" supervise", exe.display());
+    let out = schtasks(&[
+        "/create", "/tn", TASK_NAME, "/tr", &tr, "/sc", "minute", "/mo", "1", "/f",
+    ])
+    .context("调用 schtasks 失败")?;
+    if !out.status.success() {
+        // schtasks 的输出是控制台代码页（中文系统为 GBK），原样转 UTF-8 只会是乱码，
+        // 这里只保留退出码；要看具体原因，用户在 PowerShell 里跑一次同样的命令即可。
+        anyhow::bail!("注册计划任务失败（退出码 {:?}）", out.status.code());
+    }
+    // 标记必须在任务真的建成之后写，否则 status 会谎报「已托管」。
+    let _ = std::fs::write(task_marker(), TASK_NAME);
+    Ok(())
+}
+
+/// 停任务并删除。先 `end` 再 `delete`：只删不体会留下一个正在跑的实例。
+#[cfg(windows)]
+fn task_remove() {
+    let _ = schtasks(&["/end", "/tn", TASK_NAME]);
+    let _ = schtasks(&["/delete", "/tn", TASK_NAME, "/f"]);
+    let _ = std::fs::remove_file(task_marker());
+}
+
+/// 当前进程是否在某个作业对象里。
+///
+/// hook 调 `ensure` 时，WorkBuddy 会把这一串进程塞进 job，回合结束整组清掉。
+/// 看门狗要是从这种环境启动，就一定活不长——它得让位给计划任务拉起的那份。
+#[cfg(windows)]
+fn in_job() -> bool {
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::System::JobObjects::IsProcessInJob;
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let mut result = BOOL(0);
+    unsafe { IsProcessInJob(GetCurrentProcess(), None, &mut result).is_ok() && result.as_bool() }
 }
 
 fn start_guard() -> Result<()> {
@@ -355,7 +434,10 @@ fn start_guard() -> Result<()> {
     Ok(())
 }
 
-/// 拉起看门狗（常驻，发现守护不在就补一份）。
+/// 直接拉起看门狗（常驻，发现守护不在就补一份）。
+///
+/// 这条路径只在「计划任务还没装」或「调用方本来就干净」时用。装过任务之后，
+/// 常驻那份由任务计划服务每分钟检查一次，被杀了也不会超过 1 分钟没人管。
 fn start_supervise() -> Result<()> {
     use std::process::{Command, Stdio};
     std::fs::create_dir_all(data_dir())?;
@@ -435,6 +517,18 @@ fn write_autostart(target: Option<&str>) -> Result<()> {
     );
     std::fs::write(&entry, vbs)?;
 
+    // 登录自启交给启动文件夹；计划任务只负责「由服务进程创建看门狗」。
+    // 注册失败不致命（vbs 仍能让它开机起来），但要说明后果：
+    // 没有任务时，hook 补起来的看门狗仍在 WorkBuddy 的作业对象里，会被回合清理。
+    #[cfg(windows)]
+    match task_register(&exe) {
+        Ok(()) => println!("已注册计划任务：{TASK_NAME}（由任务计划服务托管，不受 WorkBuddy 回合影响）"),
+        Err(e) => {
+            eprintln!("注册计划任务失败：{e:#}");
+            eprintln!("　守护仍能开机自启，但被 WorkBuddy 的 hook 补起来那几份活不过一个回合。");
+        }
+    }
+
     if let Some(t) = target.filter(|t| !t.trim().is_empty()) {
         // 记住目标，之后 info/status 与自动发现都不会因为没带参数而失效。
         let mut store = load_store();
@@ -448,6 +542,12 @@ fn write_autostart(target: Option<&str>) -> Result<()> {
 }
 
 fn clear_autostart() -> Result<()> {
+    // 先删计划任务：它每分钟就会再起一份看门狗，先停进程等于白停。
+    #[cfg(windows)]
+    if task_installed() {
+        task_remove();
+        println!("已删除计划任务：{TASK_NAME}");
+    }
     if let Some(entry) = autostart_entry() {
         match std::fs::remove_file(&entry) {
             Ok(()) => println!("已移除自启项：{}", entry.display()),
@@ -490,6 +590,15 @@ fn cmd_autostart(args: &Args) -> Result<()> {
                 match entry.as_ref().map(|p| p.exists()) {
                     Some(true) => format!("已启用（{}）", entry.unwrap().display()),
                     _ => "未设置".into(),
+                }
+            );
+            #[cfg(windows)]
+            println!(
+                "计划任务：{}",
+                if task_installed() {
+                    format!("已注册（{TASK_NAME}，每分钟检查一次，由任务计划服务托管）")
+                } else {
+                    "未注册（重跑 autostart on 可让守护不受 WorkBuddy 回合影响）".into()
                 }
             );
             println!(
@@ -551,6 +660,12 @@ async fn cmd_supervise(_args: &Args) -> Result<()> {
         // 安静的第二次启动才不会在日志里制造「启动了两份」的错觉。
         return Ok(());
     }
+    // 装了计划任务、而自己正处在作业对象里：这份活不过一个回合，占位反而会把
+    // 真正长命的那份挡在门外（`supervise_taken` 只看心跳新鲜）。
+    #[cfg(windows)]
+    if task_installed() && in_job() {
+        return Ok(());
+    }
     println!(
         "看门狗已启动（每 10 秒检查守护）：{}",
         chrono::Local::now().format("%H:%M:%S")
@@ -591,7 +706,18 @@ fn supervise_taken() -> bool {
 fn cmd_ensure(args: &Args) -> Result<()> {
     let verbose = args.get("verbose").is_some();
     let mut started = Vec::new();
-    // 先补守护再补看门狗：守护启动时立刻落心跳，看门狗这一拍就不会再拉一份。
+
+    // 计划任务装好、而当前又身处作业对象时，什么都不要拉：
+    // 从这里 spawn 出去的看门狗会被塞进 WorkBuddy 的 hook job，回合结束整组清掉，
+    // 反而是「起来了又消失」。交给任务计划服务，它每分钟检查一次，最多 1 分钟接管。
+    #[cfg(windows)]
+    if task_installed() && in_job() {
+        if verbose {
+            println!("计划任务已托管守护（每分钟检查一次），本进程在作业对象里，不另起一份。");
+        }
+        return Ok(());
+    }
+
     if !guard_running() {
         start_guard()?;
         started.push("守护");
