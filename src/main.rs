@@ -1173,6 +1173,28 @@ fn scan_into(model: &mut Model, watcher: &mut Watcher) -> (Vec<TaskEvent>, bool)
             println!("[跟随] 定时任务会话不上屏：{stem}");
         }
     }
+    // 用户在侧边栏删掉的会话同样要退场。它的 jsonl 还在磁盘上，被删时若停在
+    // 未答复的提问上就会一直算「等你处理」——等待优先于已完成，画面会长期停在
+    // 一条已经不存在的任务上。每次扫描全量对一遍，state.json 里持久化的旧任务
+    // 也能在重启后被清掉。只查模型里出现过的 id，别拿整张删除表去套。
+    if !watcher.deleted().is_empty() {
+        let deleted = watcher.deleted();
+        let mut victims: Vec<String> = model
+            .tasks
+            .iter()
+            .filter(|t| t.source == "workbuddy")
+            .filter_map(|t| t.event.thread_id.clone())
+            .filter(|id| deleted.contains(id))
+            .collect();
+        victims.sort();
+        victims.dedup();
+        for stem in victims {
+            if model.forget_session("workbuddy", &stem) {
+                changed = true;
+                println!("[跟随] 会话已删除，退场：{stem}");
+            }
+        }
+    }
     // 状态没变但会话还在写：把「最后活动时间」推上去。
     // `event()` 只在展示内容变化时才产出事件，同一轮里状态长期不变时
     // updated_at 会停在状态切换那一刻——5 分钟释放规则据此误判成「已经没人了」，

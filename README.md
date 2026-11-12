@@ -4,7 +4,7 @@
 
 Windows 本机小工具，只读本机会话文件，局域网直连设备。不上传数据，不写系统目录，不需要账号。
 
-`Windows 10 / 11 x64` · `v0.4.4` · `MIT` · 单文件 5.4 MB，无 .NET / VC++ / Rust 运行时依赖
+`Windows 10 / 11 x64` · `v0.4.5` · `MIT` · 单文件 5.4 MB，无 .NET / VC++ / Rust 运行时依赖
 
 <p align="center">
   <img src="docs/skin-pixel.png" width="420" alt="设备上的一帧：正在工作">
@@ -39,7 +39,7 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
 没开这条，设备空闲约 2 分钟就下线，推送一定失败。
 
 ```powershell
-# 1. 下载 workbuddy-pet-0.4.4-windows-x64.exe 后，先核对设备通不通
+# 1. 下载 workbuddy-pet-0.4.5-windows-x64.exe 后，先核对设备通不通
 .\workbuddy-pet.exe check --target <设备IP>
 
 # 2. 推一帧看看版式（check 刚断开，固件要 8 秒才释放连接）
@@ -192,12 +192,12 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 ### 方式 A：直接下载（最快）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.4.4-windows-x64.exe`，约 5.4 MB，静态链接单文件。
+`workbuddy-pet-0.4.5-windows-x64.exe`，约 5.4 MB，静态链接单文件。
 
 可选核对完整性：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.4.4-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.4.5-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 与同页 `SHA256SUMS.txt` 对比。然后回到[快速开始](#快速开始)。
@@ -295,6 +295,7 @@ cargo build --locked --release      # 产物 target\release\workbuddy-pet.exe
 | 长按确认没反应 | 设备未被占用（任务已结束、已交还），或当前画面是待办通知（固件会当成完成待办） |
 | 录音后转不出字 | 跑 `voice doctor`：没装 Python / whisper 会直接报；首次录音需等约 6 秒载模型 |
 | 文字粘到了别的窗口 | 投递要求 WorkBuddy 在前台，抢不到前台会放弃而不是硬粘。点一下 WorkBuddy 再按确认 |
+| 屏幕停在一条侧边栏已经删掉的任务上 | 0.4.5 起已按 `sessions.deleted_at` 过滤；旧版升级后重启守护即退场（日志会打印「会话已删除，退场」） |
 | 日志每隔几分钟就「守护进程启动」，且没有「已断开并保存状态」 | 进程被 WorkBuddy 的 hook 作业对象清理了。看 `autostart status` 的「计划任务」是否为已注册，未注册就重跑 `autostart on` |
 | 设备停在旧画面 | 系统通知会临时覆盖约 12 秒；`push` 打印「已推送」即设备报告显示完成 |
 

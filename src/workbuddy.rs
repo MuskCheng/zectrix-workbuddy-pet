@@ -360,6 +360,41 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// 已在侧边栏删除的会话。来源：`sessions.deleted_at` 非空。
+///
+/// 删除只写数据库，会话的 `.jsonl` 还躺在 `projects\` 里。不挡掉的话它会一直被扫到：
+/// 被删时刚好停在未答复的提问上，就会永远算「等你处理」，而等待的优先级高于已完成，
+/// 结果是一条几小时前就不存在的任务长期霸屏——用户以为宠物还在跟那个任务。
+/// 缓存 15 秒，和标题、定时任务集合同一个节奏。
+fn db_deleted() -> HashSet<String> {
+    use std::time::{Duration, Instant};
+    type Set = HashSet<String>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<(Instant, Set)>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        std::sync::Mutex::new((Instant::now() - Duration::from_secs(3600), Set::new()))
+    });
+    let Ok(mut guard) = cache.lock() else {
+        return Set::new();
+    };
+    if guard.0.elapsed() < Duration::from_secs(15) {
+        return guard.1.clone();
+    }
+    let mut set = Set::new();
+    if let Some(conn) = open_readonly_db() {
+        let _ = conn.busy_timeout(Duration::from_millis(300));
+        if let Ok(mut stmt) = conn.prepare("select id from sessions where deleted_at is not null") {
+            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+                for id in rows.flatten() {
+                    set.insert(id);
+                }
+            }
+        }
+    }
+    *guard = (Instant::now(), set.clone());
+    set
+}
+
 fn mtime(path: &Path) -> i64 {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -806,6 +841,10 @@ pub struct Watcher {
     /// 后台自动化（定时任务）会话：整条不跟随、不上屏、不参与占用判定。
     /// 每次扫描从 workbuddy.db 刷新并累积（测试可手工注入）。
     automations: HashSet<String>,
+    /// 已在侧边栏删除的会话（`sessions.deleted_at` 非空）。
+    /// 会话文件还留在磁盘上，不挡掉的话，一个几小时前删掉的会话会因为末尾挂着
+    /// 未答复的提问一直算「等你处理」，把真正在跑的任务挤下屏幕。
+    deleted: HashSet<String>,
     /// 只看指定会话（stem）：调试与预览单会话状态用，正式运行不设。
     only: Option<String>,
 }
@@ -817,6 +856,7 @@ impl Watcher {
             cursors: HashMap::new(),
             notify: TaskNotify::default(),
             automations: HashSet::new(),
+            deleted: HashSet::new(),
             only: None,
         }
     }
@@ -829,9 +869,22 @@ impl Watcher {
         }
     }
 
+    /// 测试注入：把某个会话标记成「已在侧边栏删除」。
+    pub fn mark_deleted(&mut self, stem: &str) {
+        let stem = stem.trim();
+        if !stem.is_empty() {
+            self.deleted.insert(stem.to_string());
+        }
+    }
+
     /// 当前认定的定时任务会话集合，供上层把模型里已跟踪的旧轮次清出去。
     pub fn automations(&self) -> &HashSet<String> {
         &self.automations
+    }
+
+    /// 已删除的会话：跟随层要把它们从模型里请出去，否则画面会停在旧任务上。
+    pub fn deleted(&self) -> &HashSet<String> {
+        &self.deleted
     }
 
     pub fn only(mut self, stem: &str) -> Self {
@@ -869,6 +922,10 @@ impl Watcher {
                 if self.automations.contains(stem) {
                     continue;
                 }
+                // 侧边栏已删除的会话：文件还在，但人已经不认这条任务了。
+                if self.deleted.contains(stem) {
+                    continue;
+                }
                 if let Some(only) = &self.only {
                     if stem != only.as_str() {
                         continue;
@@ -898,13 +955,15 @@ impl Watcher {
         // 定时任务会话集合：db 里登记过的整条忽略；已经跟上的游标也要退场，
         // 否则它此前上过屏的状态会永远停在设备上。
         self.automations.extend(db_automations());
+        // 删除的会话也要“退场”：只跳过新扫描不够，它此前上过屏的状态会一直挂着。
+        self.deleted.extend(db_deleted());
         let retired: Vec<PathBuf> = self
             .cursors
             .keys()
             .filter(|p| {
-                p.file_stem()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|s| self.automations.contains(s))
+                p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| {
+                    self.automations.contains(s) || self.deleted.contains(s)
+                })
             })
             .cloned()
             .collect();
@@ -1845,5 +1904,21 @@ mod tests {
             m.current(1_700_000_020).is_none(),
             "关闭跟随后本机任务不上屏"
         );
+    }
+
+    /// 侧边栏删掉的会话，文件还躺在磁盘上；它被删时若停在未答复的提问上，
+    /// 就会一直算「等你处理」并抢走画面。这里确认它压根不会被扫到。
+    #[test]
+    fn deleted_sessions_are_not_scanned() {
+        let root = temp_root("deleted");
+        append(&root, &[user("帮我做个方案", 1_700_000_000_000)]);
+        let mut w = Watcher::new(root.clone());
+        assert_eq!(w.files().unwrap().len(), 1, "先确认基线能扫到");
+        w.mark_deleted("sess-0001");
+        assert!(
+            w.files().unwrap().is_empty(),
+            "已删除的会话不该再出现在扫描列表里"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }
