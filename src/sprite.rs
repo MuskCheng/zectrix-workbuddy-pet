@@ -23,10 +23,21 @@ pub enum Skin {
     Fortune,
     /// 白色宇航服：头盔、背包、猫爪旗。
     Astro,
+    /// 银头黄帽的摄影猫：毛线帽、条纹衫、背带裤、旁轴相机。
+    Lens,
+    /// 深棕头、端咖啡的咖啡师：针织帽、绿围巾、马甲与手冲杯。
+    Latte,
 }
 
 impl Skin {
-    pub const ALL: [Skin; 4] = [Skin::Pixel, Skin::Abacus, Skin::Fortune, Skin::Astro];
+    pub const ALL: [Skin; 6] = [
+        Skin::Pixel,
+        Skin::Abacus,
+        Skin::Fortune,
+        Skin::Astro,
+        Skin::Lens,
+        Skin::Latte,
+    ];
 
     pub fn id(self) -> &'static str {
         match self {
@@ -34,6 +45,8 @@ impl Skin {
             Skin::Abacus => "abacus",
             Skin::Fortune => "fortune",
             Skin::Astro => "astro",
+            Skin::Lens => "lens",
+            Skin::Latte => "latte",
         }
     }
 
@@ -43,6 +56,8 @@ impl Skin {
             Skin::Abacus => "金算喵",
             Skin::Fortune => "暴富喵",
             Skin::Astro => "星际喵",
+            Skin::Lens => "镜头喵",
+            Skin::Latte => "拿铁喵",
         }
     }
 
@@ -52,6 +67,8 @@ impl Skin {
             Skin::Abacus => "连帽衫 · 算盘与账本 · 数字敏感型",
             Skin::Fortune => "黑金机能外套 · 大耳机 · 金条与公文包",
             Skin::Astro => "白色宇航服 · 头盔与背包 · 猫爪旗",
+            Skin::Lens => "黄色毛线帽 · 条纹衫与背带裤 · 旁轴相机",
+            Skin::Latte => "针织帽 · 绿围巾与马甲 · 一杯手冲",
         }
     }
 
@@ -254,6 +271,8 @@ fn body(g: &mut Grid, skin: Skin, state: Status) {
         Skin::Abacus => body_abacus(g),
         Skin::Fortune => body_fortune(g),
         Skin::Astro => body_astro(g),
+        Skin::Lens => body_lens(g),
+        Skin::Latte => body_latte(g),
     }
 }
 
@@ -376,6 +395,70 @@ fn body_astro(g: &mut Grid) {
     g.set(10, 15, METAL);
 }
 
+/// 镜头喵：银壳头 + 黄毛线帽 + 条纹衫背带裤。
+///
+/// 30×40 里塞不下原设的所有细节，只留三个识别点：圆顶毛线帽、横条纹衫、
+/// 举在手里的旁轴相机。帽子特意比头窄一圈（戴上去才不显得像头盔），
+/// 也不加帽子上的徽章——两像素的浅点在放大后会被读成第二张脸。
+fn body_lens(g: &mut Grid) {
+    // 条纹衫：浅底上压两道深纹，留够浅色才不像补丁。
+    g.rect(10, 22, 20, 27, LIGHT);
+    for y in [24, 26] {
+        g.rect(10, y, 20, y, HAT);
+    }
+    // 背带裤从腰往下，深色打底。
+    g.poly(&[(9, 28), (21, 28), (20, 35), (10, 35)], DEEP);
+    // 背带两根：1 像素宽，比裤子浅一档才看得出是带子。
+    g.rect(11, 22, 11, 27, CLOTH);
+    g.rect(19, 22, 19, 27, CLOTH);
+    g.set(11, 27, METAL);
+    g.set(19, 27, METAL);
+    // 斜挎小包吊在腰侧。
+    g.rrect(19, 30, 22, 33, 1, CLOTH);
+    g.rect(19, 31, 22, 31, DEEP);
+    legs(g, DEEP);
+
+    // 头：银灰外壳，顶上一道亮边当高光。
+    g.ellipse(14, 16, 10, 8, METAL);
+    g.rect(9, 10, 19, 10, LIGHT);
+    // 两侧耳机，比像素喵小一圈并贴着头部，离远了会像飘着的零件。
+    for cx in [4, 24] {
+        g.circle(cx, 18, 2, DEEP);
+        g.circle(cx, 18, 1, METAL);
+    }
+    visor(g);
+    // 毛线帽：圆顶 + 帽檐，比头窄一圈。
+    g.ellipse(14, 7, 9, 5, HAT);
+    g.rect(6, 9, 22, 9, CLOTH);
+}
+
+/// 拿铁喵：通体深棕的咖啡师。
+///
+/// 绿围巾在灰阶上没有颜色可用，只能靠「脖子一圈 + 垂下的一条」认形状。
+/// 杯子是这只猫的识别点，杯身必须留白，否则和深色马甲糊在一起。
+fn body_latte(g: &mut Grid) {
+    // 马甲：中灰一片，敞开露白衬衫。
+    g.rect(10, 22, 20, 34, CLOTH);
+    g.poly(&[(12, 22), (16, 22), (15, 27), (13, 27)], LIGHT);
+    g.rect(14, 27, 15, 32, LIGHT);
+    // 围巾：脖子围一圈，再垂一条到胸前。
+    g.rect(10, 21, 20, 22, HAT);
+    g.rect(11, 23, 12, 28, HAT);
+    // 马甲纽扣。
+    g.set(13, 30, METAL);
+    legs(g, DEEP);
+
+    // 头：深棕，比马甲再深一档，两者才分得开。
+    g.ellipse(14, 16, 10, 8, DEEP);
+    g.rect(9, 10, 19, 10, CLOTH);
+    visor(g);
+    // 针织帽：圆顶 + 亮帽檐收口。帽身用深棕而不是纯黑——
+    // 纯黑会和下面的黑面罩连成一块，整颗头变成一顶「黑锅」。
+    g.ellipse(14, 7, 9, 5, DEEP);
+    g.rect(6, 9, 22, 9, METAL);
+    g.rect(7, 3, 21, 3, BLACK);
+}
+
 /// 表情：眼睛是主要区分手段。
 fn face(g: &mut Grid, state: Status, phase: usize) {
     let lx = 10;
@@ -448,6 +531,8 @@ fn arms(g: &mut Grid, skin: Skin, state: Status, phase: usize) {
         Skin::Abacus => arms_abacus(g, lift),
         Skin::Fortune => arms_fortune(g, lift),
         Skin::Astro => arms_astro(g, state, lift),
+        Skin::Lens => arms_lens(g, state, lift),
+        Skin::Latte => arms_latte(g, state, lift),
     }
 }
 
@@ -562,6 +647,60 @@ fn arms_astro(g: &mut Grid, state: Status, lift: i32) {
     if state == Status::Done {
         // 星光贴在旗面左侧，别飘到右上角和爱心/感叹号抢位置。
         sparkle(g, 23, top + 2);
+    }
+}
+
+/// 镜头喵：左手举着旁轴相机，右手垂在身侧。
+///
+/// 相机控制在 7×7：再大就会和脸并排，看起来像扛着摄像机；机身先落色、
+/// 手臂压在上面，才像握着而不是搁在旁边。
+fn arms_lens(g: &mut Grid, state: Status, lift: i32) {
+    let top = 15 + lift;
+    // 举相机的前臂。
+    g.rect(3, top + 6, 8, top + 8, LIGHT);
+    // 机身 + 腰间饰皮 + 一颗快门。
+    g.rrect(1, top, 7, top + 6, 1, DEEP);
+    g.rect(1, top + 3, 7, top + 3, CLOTH);
+    g.set(6, top - 1, METAL);
+    // 镜头：外圈浅、内圈黑、一点高光。
+    g.circle(4, top + 3, 2, METAL);
+    g.set(4, top + 3, BLACK);
+    g.set(3, top + 2, WHITE);
+
+    // 右手垂着，握拳。
+    g.rect(21, 24, 23, 29, LIGHT);
+    g.rect(21, 30, 23, 30, DEEP);
+
+    if state == Status::Done {
+        sparkle(g, 3, top - 3);
+    }
+}
+
+/// 拿铁喵：右手端一杯手冲。
+///
+/// 杯身留白、液面压深，这两层色差是灰阶下唯一能说明「这是杯子」的东西；
+/// 热气画成折线，直线会被当成杯柄。
+fn arms_latte(g: &mut Grid, state: Status, lift: i32) {
+    let top = 20 + lift;
+    // 碟：一条深色横线，别画成方块。
+    g.rect(20, top + 6, 28, top + 7, DEEP);
+    // 杯身必须描边：白底画在白背景上等于没画（第一版就栽在这）。
+    g.rrect(20, top, 28, top + 6, 1, DEEP);
+    g.rrect(21, top + 1, 27, top + 5, 0, LIGHT);
+    g.rect(21, top + 1, 27, top + 2, CLOTH);
+    // 把手：一段方括号。
+    g.rect(28, top + 2, 29, top + 4, DEEP);
+    // 热气：两段折线。
+    g.set(23, top - 2, METAL);
+    g.set(24, top - 3, METAL);
+    g.set(24, top - 4, METAL);
+
+    // 左手从肩膀垂下，起笔要压住身体边缘，否则像贴在旁边的零件。
+    g.rect(7, 23, 9, 29, CLOTH);
+    g.rect(7, 30, 9, 30, DEEP);
+
+    if state == Status::Done {
+        sparkle(g, 24, top - 6);
     }
 }
 

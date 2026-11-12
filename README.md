@@ -4,7 +4,7 @@
 
 Windows 本机小工具，只读本机会话文件，局域网直连设备。不上传数据，不写系统目录，不需要账号。
 
-`Windows 10 / 11 x64` · `v0.4.5` · `MIT` · 单文件 5.4 MB，无 .NET / VC++ / Rust 运行时依赖
+`Windows 10 / 11 x64` · `v0.4.6` · `MIT` · 单文件 5.4 MB，无 .NET / VC++ / Rust 运行时依赖
 
 <p align="center">
   <img src="docs/skin-pixel.png" width="420" alt="设备上的一帧：正在工作">
@@ -12,7 +12,7 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
 
 <p align="center"><sub>设备上真实绘制的一帧（400×300），由 <code>preview --demo working</code> 渲染</sub></p>
 
-- **四套造型，六种表情**——像素喵 / 金算喵 / 暴富喵 / 星际喵，设备上长按上/下直接换。
+- **六套造型，六种表情**——像素喵 / 金算喵 / 暴富喵 / 星际喵 / 镜头喵 / 拿铁喵，设备上长按上/下直接换。
 - **按住确认键说话**——设备麦克风采集，本机 whisper 转写，粘贴进你选中的会话输入框。音频不出本机。
 - **状态自己会跟**——正在工作、等你确认、任务完成、空闲待命，不用切窗口，也不用刷手机。
 
@@ -22,7 +22,7 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
 
 - [快速开始](#快速开始) — 三步跑起来
 - [语音输入](#语音输入) — 按住确认键说话
-- [四套造型](#四套造型)
+- [六套造型](#六套造型)
 - [设备按键](#设备按键)
 - [命令速查](#命令速查)
 - [屏幕什么时候亮](#屏幕什么时候亮) — 设备占用规则
@@ -39,7 +39,7 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
 没开这条，设备空闲约 2 分钟就下线，推送一定失败。
 
 ```powershell
-# 1. 下载 workbuddy-pet-0.4.5-windows-x64.exe 后，先核对设备通不通
+# 1. 下载 workbuddy-pet-0.4.6-windows-x64.exe 后，先核对设备通不通
 .\workbuddy-pet.exe check --target <设备IP>
 
 # 2. 推一帧看看版式（check 刚断开，固件要 8 秒才释放连接）
@@ -101,20 +101,22 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 3. **需要一次性装 Python + whisper**（见[前置条件](#前置条件与常见坑)第 8 条）。没装也能用宠物，只是转不出字。
 4. 首次要载模型（turbo 首次还要下载约 1.5 GB），之后每段 1 秒内出字。纯噪声或误触不会插入任何文字。
 
-## 四套造型
+## 六套造型
 
 <table>
   <tr>
-    <td align="center"><img src="docs/skin-pixel.png" width="360" alt="像素喵"><br><b>像素喵</b> <code>pixel</code>（默认）<br>针织尖帽 · 光剑与圆盾</td>
-    <td align="center"><img src="docs/skin-abacus.png" width="360" alt="金算喵"><br><b>金算喵</b> <code>abacus</code><br>连帽衫 · 算盘与账本</td>
+    <td align="center"><img src="docs/skin-pixel.png" width="270" alt="像素喵"><br><b>像素喵</b> <code>pixel</code>（默认）<br>针织尖帽 · 光剑与圆盾</td>
+    <td align="center"><img src="docs/skin-abacus.png" width="270" alt="金算喵"><br><b>金算喵</b> <code>abacus</code><br>连帽衫 · 算盘与账本</td>
+    <td align="center"><img src="docs/skin-fortune.png" width="270" alt="暴富喵"><br><b>暴富喵</b> <code>fortune</code><br>机能外套 · 大耳机 · 金条</td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/skin-fortune.png" width="360" alt="暴富喵"><br><b>暴富喵</b> <code>fortune</code><br>机能外套 · 大耳机 · 金条</td>
-    <td align="center"><img src="docs/skin-astro.png" width="360" alt="星际喵"><br><b>星际喵</b> <code>astro</code><br>宇航服 · 头盔 · 猫爪旗</td>
+    <td align="center"><img src="docs/skin-astro.png" width="270" alt="星际喵"><br><b>星际喵</b> <code>astro</code><br>宇航服 · 头盔 · 猫爪旗</td>
+    <td align="center"><img src="docs/skin-lens.png" width="270" alt="镜头喵"><br><b>镜头喵</b> <code>lens</code><br>毛线帽 · 条纹衫背带裤 · 旁轴相机</td>
+    <td align="center"><img src="docs/skin-latte.png" width="270" alt="拿铁喵"><br><b>拿铁喵</b> <code>latte</code><br>针织帽 · 围巾马甲 · 一杯手冲</td>
   </tr>
 </table>
 
-*四套造型共用同一套骨架与六种状态表情，只换帽子、服装与道具。图中为 `preview --demo working`
+*六套造型共用同一套骨架与六种状态表情，只换帽子、服装与道具。图中为 `preview --demo working`
 的演示数据，原尺寸 400×300。设备上长按上/下键循环切换，立即存盘；也可以用 `skin set` 指定。*
 
 ## 设备按键
@@ -125,7 +127,7 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 | --- | --- |
 | 短按 上 / 下 | 翻任务；语音确认页里则换目标会话 |
 | 短按 确认 | 回首页并恢复自动跟随；语音确认页里则粘贴文字 |
-| **长按 上 / 下** | 换宠物造型（四只循环，立即存盘） |
+| **长按 上 / 下** | 换宠物造型（六只循环，立即存盘） |
 | **长按 确认** | 开始录音，松开结束（固件行为） |
 
 任务交还设备后按键到不了程序，属正常。屏幕上正显示「待办通知」时，长按确认会被固件解释成
@@ -192,12 +194,12 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 ### 方式 A：直接下载（最快）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.4.5-windows-x64.exe`，约 5.4 MB，静态链接单文件。
+`workbuddy-pet-0.4.6-windows-x64.exe`，约 5.4 MB，静态链接单文件。
 
 可选核对完整性：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.4.5-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.4.6-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 与同页 `SHA256SUMS.txt` 对比。然后回到[快速开始](#快速开始)。

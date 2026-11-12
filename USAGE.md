@@ -88,9 +88,10 @@ workbuddy-pet forget                             删除本机状态缓存
 
 ## 换造型
 
-四套造型共用表情与状态符，只换帽子/服装/道具：`pixel` 像素喵（默认，针织帽 + 光剑圆盾）、
+六套造型共用表情与状态符，只换帽子/服装/道具：`pixel` 像素喵（默认，针织帽 + 光剑圆盾）、
 `abacus` 金算喵（兜帽 + 算盘账本）、`fortune` 暴富喵（黑金外套 + 金条公文包）、
-`astro` 星际喵（白色宇航服 + 猫爪旗）。`skin list` 看全部，`skin set astro` 或
+`astro` 星际喵（白色宇航服 + 猫爪旗）、`lens` 镜头喵（毛线帽 + 条纹衫背带裤 + 旁轴相机）、
+`latte` 拿铁喵（针织帽 + 围巾马甲 + 一杯手冲）。`skin list` 看全部，`skin set astro` 或
 `skin set 星际喵` 切换，`skin current` 查当前。
 
 选中值存在 `state.json` 的 `model.settings.pet_skin`。守护每帧从磁盘读一次，所以换肤

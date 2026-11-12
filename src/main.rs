@@ -3025,11 +3025,12 @@ mod tests {
     fn device_long_press_cycles_skins() {
         // 长按一下换一只，走到头绕回去，正反两个方向都要对。
         assert_eq!(step_skin(Skin::Pixel, 1), Skin::Abacus);
-        assert_eq!(step_skin(Skin::Astro, 1), Skin::Pixel);
-        assert_eq!(step_skin(Skin::Pixel, -1), Skin::Astro);
-        // 四只一轮回：连按四次回到原样，不会越界 panic。
+        assert_eq!(step_skin(Skin::Lens, 1), Skin::Latte);
+        assert_eq!(step_skin(Skin::Latte, 1), Skin::Pixel);
+        assert_eq!(step_skin(Skin::Pixel, -1), Skin::Latte);
+        // 六只一轮回：连按六次回到原样，不会越界 panic。
         let mut s = Skin::Pixel;
-        for _ in 0..4 {
+        for _ in 0..6 {
             s = step_skin(s, 1);
         }
         assert_eq!(s, Skin::Pixel);
