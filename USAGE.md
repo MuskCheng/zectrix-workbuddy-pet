@@ -1,7 +1,9 @@
 # workbuddy-pet — 使用说明
 
 [ZECTRIX Note 4](https://wiki.zectrix.com/) 400×300 墨水屏像素宠物，跟随本机 WorkBuddy。
-首页与安装见 [README.md](README.md)，这里是完整命令与行为细节。
+
+**第一次安装先按 [README 的快速开始](README.md#快速开始) 走一遍**（下载 → 改名 → `init` → 验收四行），
+装不上时看 [README 的前置条件与排错](README.md#前置条件与常见坑)。这份文档是完整命令与行为细节，供查阅。
 
 ## 与上游的差异
 
@@ -42,16 +44,19 @@
 
 ## 构建
 
-```bat
+只在想改代码或自己出包时才需要；**只想用的话直接下 Release 的 exe，跳过本节**。
+
+```powershell
 cd workbuddy-pet
-set CMAKE_POLICY_VERSION_MINIMUM=3.5
-cargo test --locked --release      & rem 46 项测试
+$env:CMAKE_POLICY_VERSION_MINIMUM = '3.5'
+cargo test  --locked --release      # 60 项单元 + 13 项集成；1 项需真机，ignored
 cargo build --locked --release
 ```
 
 依赖：Rust（MSVC）、CMake、VS C++ Build Tools（SDK 的原生 Opus 需要）；系统字体
 `C:\Windows\Fonts\msyh.ttc` / `msyhbd.ttc`（渲染中文）。SDK 以路径依赖引用同级的
-官方克隆，本项目不复制、不修改它。
+官方克隆（`../zectrix-local-push-sdk`），本项目不复制、不修改它——两个仓库必须并排，
+只克隆本仓库会编译失败。
 
 ## 常用命令
 
@@ -63,6 +68,8 @@ workbuddy-pet skin list|set <id>|current         查看/切换 Buddy 图鉴造�
 workbuddy-pet voice doctor [--wav 路径]          语音自检：解释器/脚本/模型就绪耗时，可试转一段
 workbuddy-pet voice say --wav 路径               只转写一段 WAV，看识别结果与耗时
 workbuddy-pet voice paste --text "..." [--send]  只测投递：粘到输入框（默认不回车）
+workbuddy-pet voice targets|windows|focus        诊断：候选投递会话 / 可见的 WorkBuddy 窗口 / 能否抢到前台
+workbuddy-pet voice preview [--two] [--out 路径] 本地渲染语音确认页，不连设备（调版式/出文档图）
 workbuddy-pet preview [--demo waiting] [--session <会话ID>] [--out 路径] [--skin <id>]
                                                  渲染 400×300 预览 PNG，不连设备；
                                                  --session 只看指定会话（不落盘）
@@ -145,13 +152,16 @@ workbuddy-pet forget                             删除本机状态缓存
 workbuddy-pet autostart on --target 192.168.1.100
 ```
 
-它做四件事：
+它做五件事：
 
 1. 把当前 exe 复制到 `%LOCALAPPDATA%\zectrix-workbuddy-pet\bin\workbuddy-pet.exe`，
    自启项指向这份**副本**而不是构建目录（`cargo clean` 不会把它弄丢）
 2. 在 `%APPDATA%\...\Startup\zectrix-workbuddy-pet.vbs` 放自启项，隐藏窗口启动 `supervise`
-3. 立刻拉起看门狗（不必等下次登录），看门狗再拉起守护，有任务就开始推送
-4. 把目标 IP 存进 `state.json`
+3. 注册计划任务 `zectrix-workbuddy-pet`（每分钟跑一次 `supervise`，已在跑则忽略），
+   让常驻进程由任务计划服务创建——这样它不属于 WorkBuddy 给 hook 建的作业对象，
+   不会随回合结束被一起清掉。注册失败会明确打印，见下文
+4. 立刻拉起看门狗（不必等下次登录），看门狗再拉起守护，有任务就开始推送
+5. 把目标 IP 存进 `state.json`；`--target` 可省略，第一次连接时自动发现并记住地址
 
 **为什么登录项拉起的是看门狗、不是守护本身**：启动文件夹每次登录只执行一次。守护被
 任务管理器结束、被新版本覆盖、或者登录项装好之后根本没重新登录过，都会出现「WorkBuddy
@@ -218,8 +228,9 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
   现在的顺序是「UIA `SetFocus` → 模拟 Alt 解除前台锁定 → 附加输入队列 →
   `SwitchToThisWindow`」，仍失败才退到「直接写输入框的 Value」（仅当框为空，
   不覆盖草稿）。所以副屏也能投。
-- **识别引擎**：优先 faster-whisper（CTranslate2），模型 `large-v3-turbo`，
-  开 VAD（切掉首尾静音）与 hotwords（项目术语：主分支、构建、投递、造型…）；
+- **识别引擎**：优先 faster-whisper（CTranslate2），模型 `large-v3-turbo`，开 VAD（切掉首尾静音）。
+  项目术语用 `initial_prompt` 做弱提示——**不用 faster-whisper 的 hotwords**：实测它会把词表
+  硬塞进结果，没说的词也会冒出来；`initial_prompt` 只影响解码倾向，不会凭空造词。
   没装 faster-whisper 时自动回退 openai-whisper。GPU 不可用就退 CPU int8。
 - 录音短于 0.4 秒按误触处理；纯噪声会被判成「没语音」而不是回显提示词。
   识别为空且电平很低时按「没听清」处理，提示靠近设备。
@@ -288,12 +299,15 @@ Agent 提问或权限确认卡在等时，设备显示**题干 + 一条框起来
 
 - `state.json`：设置、最近 100 条任务、设备地址、已提醒指纹；升级保留。
 - `out\pet-*.png`：`preview` / `init` 渲染的预览图。
-- `out\recordings\*.wav`：设备长按确认键录制的音频（16 kHz 单声道 PCM16）。
-- `watch.log`：守护与看门狗输出（超过 1 MB 在下次启动时清空）。
+- `out\recordings\*.wav`：设备长按确认键录制的音频（16 kHz 单声道 PCM16），只在录音成功时写入。
+- `watch.log`：守护与看门狗的输出，**只追加、不自动清理**。长期运行会到几 MB，属正常；
+  排查完想清空直接删掉，下次启动会自动重建。
+- `asr_worker.py`：首次转写时从 exe 释放出来的转写脚本，删掉也会重新释放。
 - `bin\workbuddy-pet.exe`：自启用的副本，`autostart on` 时复制。
 - `daemon.hb` / `watchdog.hb` / `daemon.lock`：心跳与单实例锁，用于判断谁在运行；可随时删除。
 
-`state.json` 含设备地址，不要分享；卸载用 `workbuddy-pet forget` 删除。
+`state.json` 含设备地址，不要分享。`workbuddy-pet forget` 只删这一个文件（设置、任务记录、
+提醒指纹），不动 exe、日志与录音；要彻底清干净见下一节的卸载步骤。
 
 ## 启动 / 停止 / 卸载 / 更新
 
@@ -331,11 +345,17 @@ schtasks /delete /tn zectrix-workbuddy-pet /f
 - **停止**：前台 `Ctrl+C`——向设备发送 `close()`、保存状态后退出，不自动重连。
   后台用 `workbuddy-pet autostart off`（先停看门狗再停守护，否则 10 秒内会被补回来）。
   在任务管理器里强行结束守护也可以，看门狗约 20 秒后会再拉起一份——要真正停就得用 `off`。
-- **卸载**：`workbuddy-pet autostart off` → `workbuddy-pet forget` → 删除本项目目录与
-  `%LOCALAPPDATA%\zectrix-workbuddy-pet`；不触碰 WorkBuddy 与设备上的任何数据。
-- **更新**：`cd ..\zectrix-local-push-sdk && git pull`，再回本项目
-  `cargo build --locked --release`，最后用新 exe 跑一次 `autostart on`（它会把副本换成
-  新版本并重启看门狗）；状态缓存保留。
+- **卸载**：`workbuddy-pet autostart off` → 删除 `%LOCALAPPDATA%\zectrix-workbuddy-pet`
+  （`forget` 只是删 `state.json`，可省）；不触碰 WorkBuddy 与设备上的任何数据。
+- **更新**（用 Release 的 exe）：
+  1. `workbuddy-pet autostart off`
+  2. 用新 exe 覆盖 `%LOCALAPPDATA%\zectrix-workbuddy-pet\bin\workbuddy-pet.exe`
+  3. `workbuddy-pet autostart on --target <IP>`，再 `--version` 确认版本号变了
+
+  直接 `autostart on` 也会尝试热替换，但旧进程仍占着副本时可能**静默沿用旧版**，所以先 `off` 更稳。
+- **更新**（自己编译）：`cd ..\zectrix-local-push-sdk && git pull`，再回本项目
+  `cargo build --locked --release`，然后用新 exe 跑 `autostart on`（会把副本换成新版本并重启看门狗）；
+  状态缓存保留。
 
 ## 已知边界
 
@@ -350,12 +370,23 @@ schtasks /delete /tn zectrix-workbuddy-pet /f
 
 ## 排障
 
+先看日志，比猜快得多（**`-Encoding UTF8` 不能省**，PowerShell 5.1 默认按 ANSI 读，中文会变乱码）：
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\zectrix-workbuddy-pet\watch.log" -Tail 40 -Encoding UTF8
+```
+
 | 现象 | 处理 |
 |---|---|
+| 双击 exe 没反应，只弹出一屏用法 | 正常：不带参数只打印用法。在终端里跑 `.\workbuddy-pet.exe init` |
+| PowerShell 报「无法加载模块 %LOCALAPPDATA%」 | 那是 cmd 的变量写法。PowerShell 用 `$env:LOCALAPPDATA`，且带空格/引号的路径前要加 `&` |
+| 首次运行弹「Windows 已保护你的电脑」 | exe 没有代码签名：点「更多信息 → 仍要运行」 |
+| `autostart status` 里「计划任务：未注册」 | 重跑 `autostart on` 看报错；退出码非 0 多为 `schtasks` 被策略拦住，见[计划任务](#计划任务v044-起)一节 |
 | 连不上 / 超时 | 同局域网、IP 正确、设备开启「待机保持 Wi-Fi」、无其他程序占用 |
 | 刚强杀过进程 | 等 15 秒让固件释放租约 |
 | 中文显示为方块 | 确认 `msyh.ttc` / `msyhbd.ttc` 存在 |
 | 设备停在旧画面 | 系统通知会临时覆盖约 12 秒；`push` 打印「已推送」即设备报告显示完成 |
 | 等待不响铃 | 检查 `--no-sound`、`settings.sound_enabled`；重连后的同一条提醒不会重复响 |
 | 名字不跟着改 | 侧边栏改名写数据库，最多 15 秒后同步；仍不变用 `sessions` 看读取结果 |
-| 设备「连一下又断开」、日志反复「设备忙碌」 | 旧版可能同时跑了两份守护。`tasklist \| findstr workbuddy-pet` 看到两个 `watch` 就是它，升级到 0.4.3 后互斥体会挡住第二份 |
+| `watch.log` 越变越大 | 只追加不自动清理，几 MB 无妨；删掉即可，下次启动自动重建 |
+| 设备「连一下又断开」、日志反复「设备忙碌」 | 旧版可能同时跑了两份守护。`tasklist \| findstr workbuddy-pet` 看到两个 `watch` 就是它，升级到最新版后互斥体会挡住第二份 |

@@ -4,7 +4,7 @@
 
 Windows 本机小工具，只读本机会话文件，局域网直连设备。不上传数据，不写系统目录，不需要账号。
 
-`Windows 10 / 11 x64` · `v0.4.6` · `MIT` · 单文件 5.4 MB，无 .NET / VC++ / Rust 运行时依赖
+`Windows 10 / 11 x64` · `v0.4.7` · `MIT` · 单文件 5.8 MB，无 .NET / VC++ / Rust 运行时依赖
 
 <p align="center">
   <img src="docs/skin-pixel.png" width="420" alt="设备上的一帧：正在工作">
@@ -20,7 +20,7 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
 
 ## 目录
 
-- [快速开始](#快速开始) — 三步跑起来
+- [快速开始](#快速开始) — 装一次就能跑，含验收清单
 - [语音输入](#语音输入) — 按住确认键说话
 - [六套造型](#六套造型)
 - [设备按键](#设备按键)
@@ -35,25 +35,57 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
 
 ## 快速开始
 
-前提：设备与电脑在同一局域网，且已在设备上打开「设置 → 网络同步 → 待机保持 Wi-Fi」。
-没开这条，设备空闲约 2 分钟就下线，推送一定失败。
+**先在设备上确认两件事**（这两步程序替不了）：
+
+1. 设备与电脑连**同一个 Wi-Fi**。
+2. 打开「设置 → 网络同步 → **待机保持 Wi-Fi**」。不开时设备空闲约 2 分钟就掉线，推送一定失败。
+   同一页面能看到**设备 IP**，可以先记下来（不记也行，程序能自动发现）。
+
+**下载并改名**：从 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest)
+下载 `workbuddy-pet-0.4.7-windows-x64.exe`，**重命名为 `workbuddy-pet.exe`**——下文所有命令都用这个名字。
+首次运行时 Windows 可能弹「已保护你的电脑」，点「更多信息 → 仍要运行」（exe 没有代码签名，属正常）。
+
+### 推荐：一条命令走完
 
 ```powershell
-# 1. 下载 workbuddy-pet-0.4.6-windows-x64.exe 后，先核对设备通不通
+cd "$env:USERPROFILE\Downloads"     # 下载到别的目录就换成那个目录
+.\workbuddy-pet.exe init
+```
+
+`init` 会依次打印配置现状、连设备（**不写 IP 也会自动发现，最多 5 秒**）、电量与信号、渲染预览图，
+然后只用你答两个问题（提前把 WorkBuddy 打开一次，它要读会话目录）：
+
+```
+先打开上面的预览确认版式，然后把它推到设备？ [y/N]
+登录 Windows 时自动在后台运行？ [y/N]
+```
+
+都答 `y` 即可。预览图存在 `%LOCALAPPDATA%\zectrix-workbuddy-pet\out\pet-init.png`，
+想先看一眼再决定就答 `n`，看完重跑 `init`。
+
+### 或者分三步手动来
+
+```powershell
+cd "$env:USERPROFILE\Downloads"
+
+# 1. 只核对设备（电量、信号、灰阶），不推画面
 .\workbuddy-pet.exe check --target <设备IP>
 
 # 2. 推一帧看看版式（check 刚断开，固件要 8 秒才释放连接）
 Start-Sleep 9
 .\workbuddy-pet.exe push --target <设备IP>
 
-# 3. 交给它自己跑
+# 3. 交给它自己跑：装副本、写自启、注册计划任务、立刻起看门狗
 .\workbuddy-pet.exe autostart on --target <设备IP>
 ```
 
-看到设备刷出宠物就算装好了。第 3 步会把程序复制到 `%LOCALAPPDATA%\zectrix-workbuddy-pet\bin\`，
-写入开机自启，并立刻拉起看门狗——之后关掉终端也会继续工作。
+`--target` 可以省略：`check` / `push` / `init` 不带地址时会用 mDNS 自动发现，局域网里只有一台设备时最省事；
+发现成功后地址写进 `state.json`，之后连 `--target` 都不用写。
 
-验收：
+看到设备刷出宠物就算装好了。`autostart on` 会把程序复制到 `%LOCALAPPDATA%\zectrix-workbuddy-pet\bin\`，
+写入开机自启、注册计划任务并立刻拉起看门狗——关掉终端也会继续工作。
+
+### 验收：四行关键项都要对上
 
 ```powershell
 cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
@@ -61,12 +93,43 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 ```
 
 ```
-自启项：已启用（...\Startup\zectrix-workbuddy-pet.vbs）
-看门狗：运行中（pid 9868，心跳 2 秒前）
-守护进程：运行中（pid 39976，心跳 2 秒前）
+自启项：已启用（C:\Users\你\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\zectrix-workbuddy-pet.vbs）
+计划任务：已注册（zectrix-workbuddy-pet，每分钟检查一次，由任务计划服务托管）
+守护程序：C:\Users\你\AppData\Local\zectrix-workbuddy-pet\bin\workbuddy-pet.exe
+看门狗：运行中（pid 19100，心跳 4 秒前）
+守护进程：运行中（pid 37124，心跳 5 秒前）
+保存的目标：192.168.1.100
+当前造型：像素喵（pixel）
+WorkBuddy 进程：正在运行
 ```
 
-两行都在、心跳都在 20 秒内，就正常。看门狗显示「已停止」时重跑 `autostart on`。
+| 行 | 应为 | 不对怎么办 |
+| --- | --- | --- |
+| 自启项 | 已启用 | 重跑 `autostart on` |
+| 计划任务 | **已注册** | 重跑 `autostart on` 看报错；被策略拦住见[前置条件](#前置条件与常见坑)第 4 条 |
+| 看门狗 | 运行中，心跳 < 20 秒 | `autostart off` → `autostart on` |
+| 守护进程 | 运行中，心跳 < 20 秒 | 等 20 秒让看门狗补；仍不在就 `autostart off` → `autostart on` |
+
+**「计划任务」这行最容易被当成可选项，其实不是**：缺了它守护仍能开机自启，但被 WorkBuddy hook
+拉起来的那几份活不过一个回合，表现是日志每隔几分钟一条「守护进程启动」、设备间歇性掉线。
+
+### 装完之后：三条自检
+
+下面的命令都在安装副本所在目录执行（新开终端时先 `cd` 过去）：
+
+```powershell
+cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
+# ① 只有一个 watch、一个 supervise（出现两个 watch 就是旧版双开）
+tasklist | findstr workbuddy-pet
+
+# ② 日志里没有成串的「设备忙碌」（-Encoding UTF8 不能省，否则中文全是乱码）
+Get-Content "$env:LOCALAPPDATA\zectrix-workbuddy-pet\watch.log" -Tail 20 -Encoding UTF8
+
+# ③ 能列出正在跑的会话，推导状态与侧边栏一致
+.\workbuddy-pet.exe sessions
+```
+
+三条都正常，就可以放着不用管了：之后只在有任务时占设备，任务结束 5 分钟自动交还。
 
 ## 语音输入
 
@@ -98,7 +161,7 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 
 1. **只在设备被占用时可用**（有任务在跑）。录音只能由设备发起、且必须连着；任务结束交还设备后，按键到不了程序。
 2. **只粘贴、不发送**。文字进输入框后还能改错字，自己按回车。
-3. **需要一次性装 Python + whisper**（见[前置条件](#前置条件与常见坑)第 8 条）。没装也能用宠物，只是转不出字。
+3. **需要一次性装 Python + whisper**（见[前置条件](#前置条件与常见坑)第 9 条）。没装也能用宠物，只是转不出字。
 4. 首次要载模型（turbo 首次还要下载约 1.5 GB），之后每段 1 秒内出字。纯噪声或误触不会插入任何文字。
 
 ## 六套造型
@@ -137,9 +200,9 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 
 | 命令 | 用途 |
 | --- | --- |
-| `init` | 首次使用引导：检查配置 → 连设备 → 预览 → 确认推送 → 自启 |
-| `check --target <IP>` | 只核对设备（电量、信号、灰阶），不推画面 |
-| `push [--demo <状态>] [--skin <id>]` | 推一帧当前画面；`--demo` 用演示数据 |
+| `init` | 首次使用引导：检查配置 → 连设备（不填 IP 自动发现）→ 预览 → 确认推送 → 自启 |
+| `check [--target <IP>]` | 只核对设备（电量、信号、灰阶），不推画面；省 IP 自动发现 |
+| `push [--demo <状态>] [--skin <id>] [--target <IP>]` | 推一帧当前画面；`--demo` 用演示数据 |
 | `preview [--demo <状态>] [--skin <id>] [--out 路径]` | 本地渲染 PNG，不连设备 |
 | `autostart on [--target <IP>]` / `off` / `status` | 开启 / 关闭跟随、查看状态 |
 | `skin list` / `skin set <id>` / `skin current` | 查看 / 切换造型（守护下一帧生效） |
@@ -151,7 +214,8 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 | `run` / `watch` / `supervise` | 调试用：常驻推图 / 守护 / 看门狗 |
 | `where` / `forget` | 显示数据路径 / 清空本机状态缓存 |
 
-**造型 id**：`pixel` 像素喵（默认）｜`abacus` 金算喵｜`fortune` 暴富喵｜`astro` 星际喵。
+**造型 id**：`pixel` 像素喵（默认）｜`abacus` 金算喵｜`fortune` 暴富喵｜`astro` 星际喵｜
+`lens` 镜头喵｜`latte` 拿铁喵。
 `skin set` 写进 `state.json`，不用重启；`--skin` 只是临时试看，不落盘。
 
 完整参数与行为细节见 [USAGE.md](USAGE.md)。
@@ -191,18 +255,23 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
 
 ## 完整部署
 
-### 方式 A：直接下载（最快）
+### 方式 A：直接下载（最快，推荐给只用不开发的人）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.4.6-windows-x64.exe`，约 5.4 MB，静态链接单文件。
+`workbuddy-pet-0.4.7-windows-x64.exe`，约 5.8 MB，静态链接单文件——**不需要 Rust、CMake、
+Visual Studio，也不需要克隆 SDK**。
 
-可选核对完整性：
+1. 重命名为 `workbuddy-pet.exe`（下文命令都用这个短名字）。
+2. 首次运行若弹「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」。
+3. 想核对完整性（可选）：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.4.6-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.4.7-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
-与同页 `SHA256SUMS.txt` 对比。然后回到[快速开始](#快速开始)。
+与同页 `SHA256SUMS.txt` 里的值对比（只在文件还没改名时能用这个字面名）。然后回到[快速开始](#快速开始)。
+
+程序不做安装、不写注册表；所有运行数据只在 `%LOCALAPPDATA%\zectrix-workbuddy-pet\`。
 
 ### 方式 B：脚本一键构建 + 部署
 
@@ -258,31 +327,39 @@ cargo build --locked --release      # 产物 target\release\workbuddy-pet.exe
 1. **在设备上打开「待机保持 Wi-Fi」**：设置 → 网络同步 → 待机保持 Wi-Fi（固件 3.7.5 显示为「联网保持」）。
    不开时设备空闲约 2 分钟就从 Wi-Fi 下线，`ping` 和 `arp` 都找不到它。若坚持不开，只能在设备上点
    「连接管理端」主动连过来；本程序暂未监听该请求。
-2. **记下设备 IP**（同一页面显示），上文 `<IP>` 一律替换成它。IP 变了要重跑 `autostart on --target <新IP>`。
+2. **设备 IP 在同一页面显示**，`<IP>` 一律替换成它；不带 `--target` 时程序会自动发现（mDNS，最多 5 秒），
+   只有一台设备时可以不填。IP 变了要重跑 `autostart on --target <新IP>`。
 3. **设备同时只允许一个连接**：断开后固件约 8 秒才释放租约。两条命令连着跑会报「设备忙碌」，隔 8 秒重试即可。
    守护运行期间手动 `check` / `push` 必然报忙碌，这是正常的（连接被守护占着），不是故障。
 4. **守护只允许一份，而且得由计划任务托管**。0.4.3 起用命名互斥体保证单实例，重复执行 `autostart on`
    或 `ensure` 不会多起进程。0.4.4 起 `autostart on` 会额外注册计划任务 `zectrix-workbuddy-pet`
    （每分钟触发一次 `supervise`，已在跑则忽略）。少了这个任务，被 WorkBuddy hook 拉起来的守护
    活不过一个回合——它会跟着 hook 的作业对象一起被清理，日志里没有任何收尾。
-5. **升级要先停再换**：`autostart off` → 覆盖 exe → `autostart on`。直接 `autostart on` 也会尝试热替换，
-   但旧进程仍占用副本文件时会**静默沿用旧版**，看起来升级成功其实没换。
-6. **支持范围**：Windows 10/11 **x64**；设备仅 Note 4（`zectrix-s3-epaper-4.2`，400×300），**不支持 Note 4C**；
+   **装完务必用 `autostart status` 确认「计划任务：已注册」**；若那行显示未注册且重跑仍失败，
+   多半是企业策略/终端沙箱禁止调用 `schtasks`，此时程序仍可用，只是守护被杀后要等下次发消息才恢复。
+5. **exe 要在终端里跑，双击没反应**：不带参数启动只会打印用法。用 PowerShell / cmd 进入所在目录后
+   `.\workbuddy-pet.exe init`（PowerShell）或 `workbuddy-pet.exe init`（cmd）。
+6. **升级要先停再换**：`autostart off` → 覆盖 exe → `autostart on`。直接 `autostart on` 也会尝试热替换，
+   但旧进程仍占用副本文件时会**静默沿用旧版**，看起来升级成功其实没换。换完用
+   `.\workbuddy-pet.exe --version` 确认版本号变了。
+7. **支持范围**：Windows 10/11 **x64**；设备仅 Note 4（`zectrix-s3-epaper-4.2`，400×300），**不支持 Note 4C**；
    固件 3.7.5（`zectrix-sdk` 0.2.0 配套），3.7.2 实测可连。不需要管理员权限，不需要极趣云 API Key。
-7. **PowerShell 里带空格的路径要 `&`**：`& "C:\路径\workbuddy-pet.exe" check`，直接写路径会被当成字符串。
-8. **语音输入要自己装 Python（可选）**：设备录音只是音频，转文字发生在本机，需要 Python 3.12 +
+8. **PowerShell 里带空格的路径要 `&`**：`& "C:\路径\workbuddy-pet.exe" check`，直接写路径会被当成字符串。
+   用 `%LOCALAPPDATA%` 这类 cmd 变量也会报「无法加载模块」，PowerShell 里写 `$env:LOCALAPPDATA`。
+9. **语音输入要自己装 Python（可选）**：设备录音只是音频，转文字发生在本机，需要 Python 3.12 +
    `faster-whisper`（装不上时自动回退 `openai-whisper`）。不装也能正常用，只是长按确认键录音后转不出字。
 
    ```powershell
    winget install --id Python.Python.3.12 -e
    $py = "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe"
-   & $py -m pip install faster-whisper     # 推荐：快 4～8 倍，自带 VAD 与热词
+   & $py -m pip install faster-whisper     # 推荐：快 4～8 倍，自带 VAD
    & $py -m pip install openai-whisper     # 可选：faster-whisper 缺失时的回退
    .\workbuddy-pet.exe voice doctor        # 首次会下载 large-v3-turbo（约 1.5 GB）
    ```
 
    模型默认 `large-v3-turbo`（中文明显好于 small）。GPU 走 CUDA fp16，显存不够或 cuDNN 不匹配时
-   自动退 CPU int8，短句仍能在 1 秒内出字。
+   自动退 CPU int8，短句仍能在 1 秒内出字。`voice doctor` 会把解释器、脚本、模型逐项打出来，
+   哪一步缺了直接说清楚。
 
 ## 排错
 
@@ -290,7 +367,7 @@ cargo build --locked --release      # 产物 target\release\workbuddy-pet.exe
 | --- | --- |
 | 日志反复「没有发现可用设备」，IP 没变 | 设备已从 Wi-Fi 下线：`ping <IP>` 与 `arp -a` 都查不到就确认了，去开「待机保持 Wi-Fi」 |
 | 「设备忙碌」，且只出现一次、重连即成功 | 正常：固件释放租约要 8 秒。要手动推图先 `autostart off` |
-| 「设备忙碌」连续多次、间隔 15→30→45→60 秒递增 | 旧版可能同时跑了两份守护。`tasklist \| findstr workbuddy-pet` 看到两个 `watch` 就是它，升级到 0.4.3 |
+| 「设备忙碌」连续多次、间隔 15→30→45→60 秒递增 | 旧版可能同时跑了两份守护。`tasklist \| findstr workbuddy-pet` 看到两个 `watch` 就是它，升级到最新版 |
 | 守护在跑、看门狗「已停止」 | 重跑 `autostart on`；hook 触发时也会补 |
 | 升级后功能没变 | 副本被旧进程占用导致沿用旧版：`autostart off` → 覆盖 exe → `autostart on`，再比对 SHA256 |
 | PowerShell 报「意外的标记」 | 带空格/引号的路径不能当命令，用 `& "完整路径\workbuddy-pet.exe"` 或先 `cd` |
@@ -304,20 +381,22 @@ cargo build --locked --release      # 产物 target\release\workbuddy-pet.exe
 ## 数据与卸载
 
 设置、任务记录、录音与日志都在 `%LOCALAPPDATA%\zectrix-workbuddy-pet\`（含 `state.json`、
-`watch.log`、`recordings\`）。
+`watch.log`、`out\recordings\`）。程序不写注册表、不装服务，删掉这个目录就等于卸干净。
 
 ```powershell
-.\workbuddy-pet.exe autostart off   # 停看门狗与守护、删自启项
+cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
+.\workbuddy-pet.exe autostart off   # 停看门狗与守护、删自启项与计划任务
 ```
 
-`off` 会先停看门狗再停守护，否则看门狗 10 秒内会把守护补回来。之后删除该目录即完全清干净。
-升级保留全部设置与任务记录。
+`off` 的顺序是先停看门狗再停守护（反了会被 10 秒内补回来），0.4.4 起还会 `schtasks /end` +
+`/delete` 掉计划任务。跑完删掉 `%LOCALAPPDATA%\zectrix-workbuddy-pet` 即完全清干净。
+升级则不用卸载：设置与任务记录都在 `state.json` 里保留。
 
 ## 开发
 
 ```powershell
 $env:CMAKE_POLICY_VERSION_MINIMUM = '3.5'
-cargo test --release        # 59 项单元测试 + 13 项集成测试
+cargo test --release        # 60 项单元测试 + 13 项集成测试（另有 1 项需真机，ignored）
 cargo clippy --all-targets
 cargo build --release
 ```
@@ -325,7 +404,9 @@ cargo build --release
 - 画布与版式在 `src/layout.rs`（400×300，灰阶 16 级），造型与骨架在 `src/sprite.rs`。
 - 会话状态推导在 `src/workbuddy.rs`，只读 `~/.workbuddy` 下的元数据。
 - 语音链路在 `src/voice.rs`，转写进程脚本见 `scripts/asr_worker.py`。
-- 发版：改 `Cargo.toml` 版本 → 提交 → `git tag vX.Y.Z` → 上传 exe 与 `SHA256SUMS.txt`。
+- 发版：改 `Cargo.toml` 版本，**同时改 README 里三处**（元信息行的 `vX.Y.Z`、快速开始与
+  完整部署里的下载文件名）→ 提交 → `git tag vX.Y.Z` → 上传 exe 与 `SHA256SUMS.txt`。
+  漏改文件名会让新用户照着文档去下载一个不存在的文件。
 
 ## 许可
 

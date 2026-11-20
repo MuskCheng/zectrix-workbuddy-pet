@@ -2731,7 +2731,8 @@ fn usage() {
 
 状态：working / waiting / done / error / stopped / unknown / idle
   演示状态带「演示」标记，不写入任务历史，也不代表真实任务进度。
-造型：pixel 像素喵 / abacus 金算喵 / fortune 暴富喵 / astro 星际喵
+造型：pixel 像素喵 / abacus 金算喵 / fortune 暴富喵 / astro 星际喵 / lens 镜头喵 / latte 拿铁喵
+  （设备上长按上/下挨个换；也可以 skin set <id>）
 
 设备需与电脑同一局域网，并在设备上开启「设置 → 网络同步 → 待机保持 Wi-Fi」。
 "#
