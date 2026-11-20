@@ -402,18 +402,22 @@ mod imp {
 
         // SetFocus 本身也会尽量激活宿主窗口，是「抢前台」的第二条路。
         // 只有真的拿到键盘焦点才允许按 Ctrl+V——否则会粘到别的程序里。
-        let mut focused = false;
-        for _ in 0..6 {
-            if unsafe { element.SetFocus() }.is_ok() {
-                focused = true;
+        //
+        // 关键：`SetFocus()` 返回 S_OK **不等于**键盘焦点已经到了 DOM。Electron 的
+        // 输入框在渲染进程里，UIA 的请求要跨进程异步转过去，紧接着查
+        // `CurrentHasKeyboardFocus` 经常还是 false。老实现只要 SetFocus 成功就
+        // 立刻判定，于是第一次必然报「没拿到键盘焦点」——用户得按三次，前两次
+        // 其实只是没等到。这里改成每轮「按一下 → 睡 80 ms → 再查」，最多 1.6 秒，
+        // 正常情况第二轮就能过半。
+        let mut keyboard_ready = has_keyboard_focus(&element);
+        for _ in 0..20 {
+            if keyboard_ready {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(120));
+            let _ = unsafe { element.SetFocus() };
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            keyboard_ready = has_keyboard_focus(&element);
         }
-        let keyboard_ready = focused
-            && unsafe { element.CurrentHasKeyboardFocus() }
-                .map(|v| v.as_bool())
-                .unwrap_or(false);
 
         if !keyboard_ready {
             if let Err(front_err) = front {
@@ -448,13 +452,15 @@ mod imp {
         let mut ready = has_keyboard_focus(&element);
         if !ready {
             // 同一套抢前台：SetFocus 会顺带激活宿主窗口，比模拟按键稳。
+            // 和粘贴一样要「按下 → 等 → 再查」，不能只看 SetFocus 的返回值。
             let _ = focus_window();
-            for _ in 0..6 {
-                if unsafe { element.SetFocus() }.is_ok() && has_keyboard_focus(&element) {
+            for _ in 0..20 {
+                let _ = unsafe { element.SetFocus() };
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                if has_keyboard_focus(&element) {
                     ready = true;
                     break;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(120));
             }
         }
         if !ready {

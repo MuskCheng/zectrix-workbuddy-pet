@@ -245,13 +245,18 @@ cd "$env:LOCALAPPDATA\zectrix-workbuddy-pet\bin"
   现在的顺序是「UIA `SetFocus` → 模拟 Alt 解除前台锁定 → 附加输入队列 →
   `SwitchToThisWindow`」，仍失败才退到「直接写输入框的 Value」（仅当框为空，
   不覆盖草稿）。所以副屏也能投。
+- **焦点要等，不能只看返回值**：`SetFocus()` 成功只代表请求被接受，Electron 在渲染
+  进程里异步接管，紧接着查 `CurrentHasKeyboardFocus` 往往还是 false。现在每 80 ms
+  重按一次并复查，最多 1.6 秒——以前第一次按键必然报「输入框没拿到键盘焦点」，
+  要按三次才行。
 - **识别引擎**：优先 faster-whisper（CTranslate2），模型 `large-v3-turbo`，开 VAD（切掉首尾静音）。
   项目术语用 `initial_prompt` 做弱提示——**不用 faster-whisper 的 hotwords**：实测它会把词表
   硬塞进结果，没说的词也会冒出来；`initial_prompt` 只影响解码倾向，不会凭空造词。
   没装 faster-whisper 时自动回退 openai-whisper。GPU 不可用就退 CPU int8。
 - 录音短于 0.4 秒按误触处理；纯噪声会被判成「没语音」而不是回显提示词。
   识别为空且电平很低时按「没听清」处理，提示靠近设备。
-- 首次要载模型（turbo 首次还要下载约 1.5 GB），之后每段 0.3～1.5 秒出字。
+- 模型在设备亮起（首次上屏成功）后就后台预热，实测加载 6～7 秒、推理约 1 秒；
+  预热完成前松手会等它加载完，之后每段 0.3～1.5 秒出字。首次安装还要下载约 1.5 GB。
   转写进程随守护生命周期存在，不单独常驻。
 - 环境自检：`voice doctor [--wav 路径]` —— 打印解释器、脚本、模型、引擎与耗时，
   可顺带试转一段音频。`voice paste --text "..."` 只测投递链路，不录音；

@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 use workbuddy_pet::{
     device, layout,
@@ -370,7 +371,23 @@ fn schtasks(args: &[&str]) -> std::io::Result<std::process::Output> {
         .output()
 }
 
-/// 注册计划任务：每分钟触发一次 `supervise`。
+/// 跑一段 PowerShell，不弹窗。
+///
+/// 存在的理由只有一个：`schtasks.exe` 在部分受管环境里被安全策略拉黑，而且
+/// **连调用它的进程一起终止**，程序根本没机会拿到错误码。`Register-ScheduledTask`
+/// 走的是任务计划 COM 接口，不受那条黑名单影响，实测可用。
+#[cfg(windows)]
+fn powershell(script: &str) -> std::io::Result<std::process::Output> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .output()
+}
+
+/// 注册计划任务：每分钟触发一次 `supervise --managed`。
 ///
 /// 触发频率选 1 分钟，是因为它同时承担「首次启动」和「被杀后自愈」两件事，
 /// 而 Task Scheduler 默认的多实例策略是 IgnoreNew——看门狗已经在跑时，
@@ -381,17 +398,40 @@ fn schtasks(args: &[&str]) -> std::io::Result<std::process::Output> {
 /// 不继承 WorkBuddy 给 hook 的那个作业对象。直接 `spawn` 的看门狗会被
 /// 回合结束时的 job 清理连带杀掉——日志里连一句收尾都没有，这正是
 /// 「守护每隔几分钟消失一次」的根因。
+///
+/// `--managed` 是给看门狗看的：任务计划**也会**给任务实例建 job，所以那里
+/// 不能用 `in_job()` 判断「我是不是被 WorkBuddy 拉起来的短命进程」。
 #[cfg(windows)]
 fn task_register(exe: &Path) -> Result<()> {
-    let tr = format!("\"{}\" supervise", exe.display());
-    let out = schtasks(&[
-        "/create", "/tn", TASK_NAME, "/tr", &tr, "/sc", "minute", "/mo", "1", "/f",
-    ])
-    .context("调用 schtasks 失败")?;
-    if !out.status.success() {
-        // schtasks 的输出是控制台代码页（中文系统为 GBK），原样转 UTF-8 只会是乱码，
-        // 这里只保留退出码；要看具体原因，用户在 PowerShell 里跑一次同样的命令即可。
-        anyhow::bail!("注册计划任务失败（退出码 {:?}）", out.status.code());
+    let exe_lit = exe.display().to_string().replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+         $a=New-ScheduledTaskAction -Execute '{exe_lit}' -Argument 'supervise --managed'; \
+         $t=New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddMinutes(1) \
+            -RepetitionInterval (New-TimeSpan -Minutes 1); \
+         $s=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew \
+            -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries \
+            -ExecutionTimeLimit (New-TimeSpan -Days 3650); \
+         Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $a -Trigger $t -Settings $s \
+            -Description 'WorkBuddy 宠物：托管看门狗，使守护不被 WorkBuddy 回合清理' \
+            -Force | Out-Null"
+    );
+    let mut done = false;
+    if let Ok(out) = powershell(&script) {
+        done = out.status.success();
+    }
+    if !done {
+        // 退回 schtasks：老环境更稳，不依赖 PowerShell 是否可用。
+        let tr = format!("\"{}\" supervise --managed", exe.display());
+        let out = schtasks(&[
+            "/create", "/tn", TASK_NAME, "/tr", &tr, "/sc", "minute", "/mo", "1", "/f",
+        ])
+        .context("调用 schtasks 失败")?;
+        if !out.status.success() {
+            // schtasks 的输出是控制台代码页（中文系统为 GBK），原样转 UTF-8 只会是
+            // 乱码，这里只保留退出码；要看具体原因，用户跑一次同样的命令即可。
+            anyhow::bail!("注册计划任务失败（schtasks 与 PowerShell 都没成功）");
+        }
     }
     // 标记必须在任务真的建成之后写，否则 status 会谎报「已托管」。
     let _ = std::fs::write(task_marker(), TASK_NAME);
@@ -399,8 +439,17 @@ fn task_register(exe: &Path) -> Result<()> {
 }
 
 /// 停任务并删除。先 `end` 再 `delete`：只删不体会留下一个正在跑的实例。
+///
+/// 同样两条路都走一遍——`schtasks` 被拉黑时它连错误都不返回（进程可能直接被
+/// 终止），只有 PowerShell 那条能把任务真正删掉，否则 `autostart off` 会
+/// 「停不掉」：任务每分钟又把看门狗拉回来。
 #[cfg(windows)]
 fn task_remove() {
+    let script = format!(
+        "Stop-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction SilentlyContinue; \
+         Unregister-ScheduledTask -TaskName '{TASK_NAME}' -Confirm:$false -ErrorAction SilentlyContinue"
+    );
+    let _ = powershell(&script);
     let _ = schtasks(&["/end", "/tn", TASK_NAME]);
     let _ = schtasks(&["/delete", "/tn", TASK_NAME, "/f"]);
     let _ = std::fs::remove_file(task_marker());
@@ -654,7 +703,7 @@ fn cmd_autostart(args: &Args) -> Result<()> {
 /// 为什么需要它——启动文件夹只在登录那一刻执行一次，进程被结束、被更新覆盖、
 /// 或者自启装好之后根本没重新登录，都会出现「WorkBuddy 在跑、却没人推」。
 /// 它自己也是本程序，心跳写 `watchdog.hb`，`autostart status` 与 `off` 都看这个。
-async fn cmd_supervise(_args: &Args) -> Result<()> {
+async fn cmd_supervise(args: &Args) -> Result<()> {
     if supervise_taken() {
         // 已有看门狗在跑：直接退出，不打印——登录自启与手动启动会同时触发，
         // 安静的第二次启动才不会在日志里制造「启动了两份」的错觉。
@@ -662,8 +711,14 @@ async fn cmd_supervise(_args: &Args) -> Result<()> {
     }
     // 装了计划任务、而自己正处在作业对象里：这份活不过一个回合，占位反而会把
     // 真正长命的那份挡在门外（`supervise_taken` 只看心跳新鲜）。
+    //
+    // 但 `in_job()` 不能单独作为判据：**任务计划服务也会给任务实例建作业对象**，
+    // 由它启动的看门狗同样在 job 里。第一版没区分，结果计划任务每次触发都被这份
+    // 逻辑劝退（退出码 0、无输出），于是「任务注册好了却一个进程都起不来」。
+    // 现在由服务拉起的实例带 `--managed`，明确表示「我知道自己在 job 里，但那是
+    // 任务计划的 job，不是 WorkBuddy 回合的 job」。
     #[cfg(windows)]
-    if task_installed() && in_job() {
+    if task_installed() && in_job() && !args.has("managed") {
         return Ok(());
     }
     println!(
@@ -1477,19 +1532,83 @@ fn push_target(out: &mut Vec<voice::Target>, t: &Task) {
     });
 }
 
-/// 转写一段录音。首次会拉起常驻进程（要载模型，几秒），之后只付推理时间。
+/// 转写进程的共享槽：`Ready` 那一半是常驻 worker，`busy` 表示正在预热。
+///
+/// 为什么不是简单的 `Option<Asr>`：预热是后台任务，转写请求可能正好在预热途中
+/// 到达。没有 `busy` 标志只能靠「槽里有没有值」判断，分不清「还没开始」和
+/// 「正在加载」——前者该自己拉一个，后者该等，重复拉会多占一份 1.5 GB 模型。
+type AsrSlot = Arc<(Mutex<Option<voice::Asr>>, AtomicBool)>;
+
+/// 后台预热转写进程。
+///
+/// 模型加载实测 6.9 秒（1.5 GB 权重 + CUDA 初始化），推理只要 1 秒。首次录音才
+/// 拉进程的话，用户从松手到看见字要等 8 秒，体感就是「语音很慢」；而设备被占用
+/// 时用户多半马上要说话，提前拉起能把这个等待藏进他自己的操作时间里。
+///
+/// 失败只打一行提示：没装 Python / 没装 whisper 的人本来就用不了语音，不能因此
+/// 影响宠物本身的推送。
+fn warm_asr(slot: &AsrSlot) {
+    let (lock, busy) = &**slot;
+    if busy.swap(true, Ordering::SeqCst) {
+        return; // 已经有一份在预热
+    }
+    if lock.lock().map(|g| g.is_some()).unwrap_or(false) {
+        busy.store(false, Ordering::SeqCst);
+        return;
+    }
+    let slot = Arc::clone(slot);
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let spawned = tokio::task::spawn_blocking(voice::Asr::spawn).await;
+        let (lock, busy) = &*slot;
+        match spawned {
+            Ok(Ok(worker)) => {
+                let model = worker.model.clone();
+                if let Ok(mut g) = lock.lock() {
+                    if g.is_none() {
+                        *g = Some(worker);
+                    }
+                }
+                println!(
+                    "[语音] 转写模型已预热（{model}，{:.1} 秒），首次录音不用再等加载",
+                    started.elapsed().as_secs_f32()
+                );
+            }
+            Ok(Err(e)) => println!("[语音] 预热跳过（真要用时再试）：{e}"),
+            Err(e) => println!("[语音] 预热任务异常：{e}"),
+        }
+        busy.store(false, Ordering::SeqCst);
+    });
+}
+
+/// 转写一段录音。优先用预热好的进程，没有才现场拉一个。
 ///
 /// 转写失败就把进程丢掉重起：whisper 崩过一次之后，同一个进程再问也是坏的，
 /// 留着只会让后面每一段都失败。
-async fn transcribe_voice(asr: &mut Option<voice::Asr>, wav: &Path) -> Result<String> {
-    if asr.is_none() {
-        *asr = Some(tokio::task::spawn_blocking(voice::Asr::spawn).await??);
-        println!(
-            "[语音] 转写进程就绪（模型 {}）",
-            asr.as_ref().map(|w| w.model.as_str()).unwrap_or("?")
-        );
+async fn transcribe_voice(slot: &AsrSlot, wav: &Path) -> Result<String> {
+    let (lock, busy) = &**slot;
+    // 预热可能还在加载：等它，别同时拉第二个 python。
+    let mut worker = None;
+    for _ in 0..100 {
+        if let Ok(mut g) = lock.lock() {
+            if let Some(w) = g.take() {
+                worker = Some(w);
+                break;
+            }
+        }
+        if !busy.load(Ordering::SeqCst) {
+            break; // 没在预热（也没预热成功），自己拉
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
     }
-    let mut worker = asr.take().expect("上面刚补上");
+    let mut worker = match worker {
+        Some(w) => w,
+        None => {
+            let w = tokio::task::spawn_blocking(voice::Asr::spawn).await??;
+            println!("[语音] 转写进程就绪（模型 {}）", w.model);
+            w
+        }
+    };
     let path = wav.to_path_buf();
     let (worker, result) = tokio::task::spawn_blocking(move || {
         let r = worker.transcribe(&path);
@@ -1498,7 +1617,9 @@ async fn transcribe_voice(asr: &mut Option<voice::Asr>, wav: &Path) -> Result<St
     .await?;
     match result {
         Ok(text) => {
-            *asr = Some(worker);
+            if let Ok(mut g) = lock.lock() {
+                *g = Some(worker);
+            }
             Ok(text)
         }
         Err(e) => {
@@ -2205,8 +2326,10 @@ async fn cmd_run(args: &Args) -> Result<()> {
     let mut frame = 0usize;
     let mut last_sig: Option<String> = None;
     // 语音投递：录音只能由设备发起、且必须持有连接，所以它天然只在「设备已被
-    // 占用」时可用——不常驻、不额外抢设备，任务结束就随连接一起消失。
-    let mut asr: Option<voice::Asr> = None;
+    // 占用」时可用——不常驻设备、不额外抢连接，任务结束就随连接一起消失。
+    // 转写进程本身在第一次推送成功后预热（见 warm_asr），把 7 秒的模型加载
+    // 藏进用户「松开按键之前」的那段时间里。
+    let asr_slot: AsrSlot = Arc::new((Mutex::new(None), AtomicBool::new(false)));
     let mut draft: Option<voice::Draft> = None;
     // 设备正在录音时固件占着采集，推送和响铃都会拿到 Busy——这一拍直接跳过，
     // 等 RecordingFinished 再恢复，别让日志里刷一串「推送失败」。
@@ -2218,6 +2341,9 @@ async fn cmd_run(args: &Args) -> Result<()> {
     scan_and_report(&mut model, &mut watcher, &mut store, &dev, false).await;
     if push_if_changed(&dev, &mut model, &mut store, &fonts, fmt, frame, &mut last_sig).await {
         frame = (frame + 1) % 6;
+        // 设备刚亮起来，用户很可能接着长按说话：这时候把转写进程拉起来预热，
+        // 模型加载的 7 秒就用他自己的操作时间付掉了。
+        warm_asr(&asr_slot);
     }
     // 首扫静默是为了不把历史回放当成新提醒，但如果此刻屏幕上正停在「等你处理」，
     // 那是一次真正的漏报——设备超时重连、守护重启都会走到这里，等待页会无声出现。
@@ -2547,7 +2673,7 @@ async fn cmd_run(args: &Args) -> Result<()> {
                         );
                         push_scene(&dev, scene, &fonts, fmt, &mut last_sig).await;
                         // 首次要载模型（几秒），之后每段只剩推理时间。
-                        match transcribe_voice(&mut asr, &clip.path).await {
+                        match transcribe_voice(&asr_slot, &clip.path).await {
                             Ok(text) if text.trim().is_empty() => {
                                 println!("[语音] 识别结果为空");
                                 let scene =

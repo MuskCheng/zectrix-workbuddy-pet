@@ -4,7 +4,7 @@
 
 Windows 本机小工具，只读本机会话文件，局域网直连设备。不上传数据，不写系统目录，不需要账号。
 
-`Windows 10 / 11 x64` · `v0.5.0` · `MIT` · 单文件 5.8 MB，无 .NET / VC++ / Rust 运行时依赖
+`Windows 10 / 11 x64` · `v0.5.1` · `MIT` · 单文件 5.8 MB，无 .NET / VC++ / Rust 运行时依赖
 
 <p align="center">
   <img src="docs/skin-pixel.png" width="420" alt="设备上的一帧：正在工作">
@@ -44,7 +44,7 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
    同一页面能看到**设备 IP**，可以先记下来（不记也行，程序能自动发现）。
 
 **下载并改名**：从 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest)
-下载 `workbuddy-pet-0.5.0-windows-x64.exe`，**重命名为 `workbuddy-pet.exe`**——下文所有命令都用这个名字。
+下载 `workbuddy-pet-0.5.1-windows-x64.exe`，**重命名为 `workbuddy-pet.exe`**——下文所有命令都用这个名字。
 首次运行时 Windows 可能弹「已保护你的电脑」，点「更多信息 → 仍要运行」（exe 没有代码签名，属正常）。
 
 ### 推荐：一条命令走完
@@ -169,7 +169,7 @@ Get-Content "$env:LOCALAPPDATA\zectrix-workbuddy-pet\watch.log" -Tail 20 -Encodi
 1. **只在设备被占用时可用**（有任务在跑）。录音只能由设备发起、且必须连着；任务结束交还设备后，按键到不了程序。
 2. **两次确认**：第一次粘贴、第二次发送。中间可以抬头看电脑、改错字——第二次只按回车，**不会重新粘贴**，改过的内容保留。
 3. **需要一次性装 Python + whisper**（见[前置条件](#前置条件与常见坑)第 9 条）。没装也能用宠物，只是转不出字。
-4. 首次要载模型（turbo 首次还要下载约 1.5 GB），之后每段 1 秒内出字。纯噪声或误触不会插入任何文字。
+4. 模型会在设备亮起后自动预热，**松手到出字通常 1 秒内**；只有第一次安装（要下载约 1.5 GB）才会明显等。纯噪声或误触不会插入任何文字。
 
 ## 任务总结
 
@@ -292,7 +292,7 @@ Get-Content "$env:LOCALAPPDATA\zectrix-workbuddy-pet\watch.log" -Tail 20 -Encodi
 ### 方式 A：直接下载（最快，推荐给只用不开发的人）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.5.0-windows-x64.exe`，约 5.8 MB，静态链接单文件——**不需要 Rust、CMake、
+`workbuddy-pet-0.5.1-windows-x64.exe`，约 5.8 MB，静态链接单文件——**不需要 Rust、CMake、
 Visual Studio，也不需要克隆 SDK**。
 
 1. 重命名为 `workbuddy-pet.exe`（下文命令都用这个短名字）。
@@ -300,7 +300,7 @@ Visual Studio，也不需要克隆 SDK**。
 3. 想核对完整性（可选）：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.5.0-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.5.1-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 与同页 `SHA256SUMS.txt` 里的值对比（只在文件还没改名时能用这个字面名）。然后回到[快速开始](#快速开始)。
