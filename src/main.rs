@@ -1072,7 +1072,12 @@ fn cmd_voice(args: &Args) -> Result<()> {
                     title: "写周报".into(),
                 });
             }
-            let d = voice::Draft::new(text.to_string(), 3.2, targets, now());
+            let mut d = voice::Draft::new(text.to_string(), 3.2, targets, now());
+            // `--pasted`：渲染「已粘贴，等发送」那一版，用于出文档图与调版式。
+            if args.has("pasted") {
+                d.pasted = true;
+                d.expires_at = now() + voice::SEND_SECS;
+            }
             let scene = layout::voice(&d, now());
             let fonts = Fonts::load()?;
             let png = raster::to_png(&scene, &fonts)?;
@@ -1530,6 +1535,22 @@ async fn deliver_voice(draft: voice::Draft) -> Result<String> {
     Ok(what)
 }
 
+/// 总结页此刻还该不该存在：开关关掉、任务不再是完成态、或文本没了，都该退回主界面。
+fn summary_visible(model: &Model, at: i64) -> bool {
+    model.settings.summary_enabled
+        && model
+            .current(at)
+            .is_some_and(|t| t.status() == Status::Done && !t.event.summary.is_empty())
+}
+
+/// 第二次确认：只回车，把已经粘进输入框的那条发出去。
+///
+/// 不重新粘贴是刻意的——两段之间用户可能已经在电脑上改了错字，重贴会覆盖掉。
+async fn send_voice() -> Result<()> {
+    tokio::task::spawn_blocking(voice::press_enter).await??;
+    Ok(())
+}
+
 fn describe(model: &Model) -> String {
     let at = now();
     let current = model.current(at);
@@ -1608,6 +1629,10 @@ fn with_model(args: &Args, store: &mut Store) -> Model {
             Some(s) => model.settings.pet_skin = s.id().into(),
             None => eprintln!("未知造型 {v}，用 `skin list` 看可选造型；本次沿用 {}", model.settings.pet_skin),
         }
+    }
+    // `preview --summary [页码]`：直接渲染总结页，用于调版式和出文档配图。
+    if let Some(v) = args.get("summary") {
+        model.summary_page = Some(v.parse::<usize>().unwrap_or(0));
     }
     model
 }
@@ -1689,6 +1714,62 @@ fn cmd_skin(args: &Args) -> Result<()> {
         }
         other => set_skin(other),
     }
+}
+
+/// 任务总结：开关与本地预览。
+///
+/// `show` 会重新扫一遍会话再打印分页结果——总结正文不落盘（见 `Event.summary`
+/// 的 serde(skip)），所以只能现场从会话记录里取，不能从 state.json 读。
+fn cmd_summary(args: &Args) -> Result<()> {
+    let action = args
+        .get("action")
+        .or_else(|| args.get("arg0"))
+        .unwrap_or("show")
+        .to_ascii_lowercase();
+    let mut store = load_store();
+    match action.as_str() {
+        "on" | "enable" | "off" | "disable" => {
+            store.model.settings.summary_enabled = action.starts_with("on") || action.starts_with("enable");
+            let on = store.model.settings.summary_enabled;
+            save_store(&store)?;
+            println!(
+                "任务总结：{}",
+                if on {
+                    "已开启（完成后按 ↓ 翻页查看，读最后一轮回复正文，仅内存）"
+                } else {
+                    "已关闭（不再读取助手回复正文，完成页只显示「任务完成」）"
+                }
+            );
+        }
+        _ => {
+            let mut watcher = Watcher::new(workbuddy_root());
+            let mut model = store.model.clone();
+            scan_into(&mut model, &mut watcher);
+            match model.current(now()) {
+                Some(t) if !t.event.summary.is_empty() => {
+                    let pages = layout::summary_pages(&t.event.summary);
+                    println!("当前任务：{} · {}", t.label(), t.event.title);
+                    println!(
+                        "总结 {} 字，{} 页（设备上按 ↓ 进入，↑↓ 翻页，确认退出）",
+                        t.event.summary.chars().count(),
+                        pages.len()
+                    );
+                    for (i, page) in pages.iter().enumerate() {
+                        println!("--- 第 {}/{} 页 ---", i + 1, pages.len());
+                        for line in page {
+                            println!("{line}");
+                        }
+                    }
+                }
+                Some(t) => println!(
+                    "当前任务「{}」没有可显示的总结（定时任务、已删会话，或这一轮还没有回复）",
+                    t.event.title
+                ),
+                None => println!("当前没有正在跟踪的任务"),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn set_skin(value: &str) -> Result<()> {
@@ -2186,7 +2267,16 @@ async fn cmd_run(args: &Args) -> Result<()> {
                 if !model.settings.follow_enabled {
                     continue;
                 }
-                if scan_and_report(&mut model, &mut watcher, &mut store, &dev, true).await
+                let changed = scan_and_report(&mut model, &mut watcher, &mut store, &dev, true).await;
+                // 总结页只在「仍是完成态、文本还在」时成立。任务被新轮次顶掉、
+                // 或用户在侧边栏删了会话，就退回主界面——否则上下键会停在一个
+                // 画面上根本不存在的视图里，按下去看起来像失灵。
+                let stale_summary =
+                    model.summary_page.is_some() && !summary_visible(&model, now());
+                if stale_summary {
+                    model.summary_page = None;
+                }
+                if (changed || stale_summary)
                     && draft.is_none()
                     && push_if_changed(&dev, &mut model, &mut store, &fonts, fmt, frame, &mut last_sig)
                         .await
@@ -2211,21 +2301,51 @@ async fn cmd_run(args: &Args) -> Result<()> {
                                 match (key, action) {
                                     (zectrix_sdk::Key::Up, _) => {
                                         d.cycle(-1);
+                                        if d.pasted {
+                                            // 已粘贴后换会话没有意义（文字就在原处），
+                                            // 但完全没反应会让人以为按键坏了，给一句话说明。
+                                            d.hint = Some("已粘贴，按确认键发送".into());
+                                        }
                                         draft = Some(d);
                                     }
                                     (zectrix_sdk::Key::Down, _) => {
                                         d.cycle(1);
+                                        if d.pasted {
+                                            d.hint = Some("已粘贴，按确认键发送".into());
+                                        }
                                         draft = Some(d);
                                     }
                                     _ => {
                                         if d.text.trim().is_empty() {
                                             println!("[语音] 没有可用文字，丢弃");
                                             last_sig = None;
+                                        } else if d.pasted {
+                                            // 第二次确认 = 发送。这一次不重贴，
+                                            // 让用户在两段之间改过的字留在原地。
+                                            match send_voice().await {
+                                                Ok(()) => {
+                                                    println!("[语音] 已回车发送");
+                                                    last_sig = None;
+                                                }
+                                                Err(e) => {
+                                                    // 发送失败不丢草稿：多半是焦点被别人抢了，
+                                                    // 点一下 WorkBuddy 再按一次即可。
+                                                    eprintln!("[语音] 发送失败: {e}");
+                                                    d.hint = Some(format!("发送失败：{e}"));
+                                                    d.expires_at = now() + voice::SEND_SECS;
+                                                    draft = Some(d);
+                                                }
+                                            }
                                         } else {
                                             match deliver_voice(d.clone()).await {
                                                 Ok(what) => {
-                                                    println!("[语音] {what}");
-                                                    last_sig = None;
+                                                    // 粘好先停在这一页，等第二次确认；
+                                                    // 只有 45 秒窗口，过后草稿丢弃但文字仍在框里。
+                                                    println!("[语音] {what}；再按确认键发送");
+                                                    d.pasted = true;
+                                                    d.hint = None;
+                                                    d.expires_at = now() + voice::SEND_SECS;
+                                                    draft = Some(d);
                                                 }
                                                 Err(e) => {
                                                     // 失败不丢文本：多半是窗口没在前台、
@@ -2263,6 +2383,83 @@ async fn cmd_run(args: &Args) -> Result<()> {
                             // 长按换造型之类的其它手势：收起草稿，按键照常处理。
                             println!("[语音] 收起草稿，按键交给常规操作");
                             last_sig = None;
+                        }
+                        // 总结浏览：完成态按「下」进入，上下翻页，确认退出。
+                        // 只在明确进入后占用上下键，主页面的「翻任务」不受影响。
+                        if draft.is_none() {
+                            if let Some(page) = model.summary_page {
+                                // 页数以当前文本为准重算：任务被新轮次顶掉时不会越界。
+                                let total = model
+                                    .current(now())
+                                    .map(|t| layout::summary_pages(&t.event.summary).len())
+                                    .unwrap_or(1)
+                                    .max(1);
+                                let next = match (key, action) {
+                                    (zectrix_sdk::Key::Up, zectrix_sdk::KeyAction::Short) => {
+                                        if page == 0 {
+                                            None
+                                        } else {
+                                            Some(page - 1)
+                                        }
+                                    }
+                                    (zectrix_sdk::Key::Down, zectrix_sdk::KeyAction::Short) => {
+                                        // 末页再按一次即退出，形成闭环。
+                                        if page + 1 >= total {
+                                            None
+                                        } else {
+                                            Some(page + 1)
+                                        }
+                                    }
+                                    (zectrix_sdk::Key::Confirm, zectrix_sdk::KeyAction::Short) => None,
+                                    _ => Some(page),
+                                };
+                                if matches!(action, zectrix_sdk::KeyAction::Short) {
+                                    model.summary_page = next;
+                                    if push_if_changed(
+                                        &dev,
+                                        &mut model,
+                                        &mut store,
+                                        &fonts,
+                                        fmt,
+                                        frame,
+                                        &mut last_sig,
+                                    )
+                                    .await
+                                    {
+                                        frame = (frame + 1) % 6;
+                                    }
+                                    continue;
+                                }
+                                // 长按换造型也要看得见结果：先退出总结页再交给常规分支。
+                                model.summary_page = None;
+                            } else if matches!(
+                                (key, action),
+                                (zectrix_sdk::Key::Down, zectrix_sdk::KeyAction::Short)
+                            ) {
+                                let can_summary = model.current(now()).is_some_and(|t| {
+                                    model.settings.summary_enabled
+                                        && t.status() == Status::Done
+                                        && !t.event.summary.is_empty()
+                                });
+                                if can_summary {
+                                    model.summary_page = Some(0);
+                                    println!("[总结] 进入总结页（上下翻页，确认退出）");
+                                    if push_if_changed(
+                                        &dev,
+                                        &mut model,
+                                        &mut store,
+                                        &fonts,
+                                        fmt,
+                                        frame,
+                                        &mut last_sig,
+                                    )
+                                    .await
+                                    {
+                                        frame = (frame + 1) % 6;
+                                    }
+                                    continue;
+                                }
+                            }
                         }
                         // 短按翻任务、长按换造型：两个手势各占一个，互不抢。
                         // 设备只上报「上下短按」「上下长按」「确认短按」三种
@@ -2315,6 +2512,8 @@ async fn cmd_run(args: &Args) -> Result<()> {
                         // 长按确认键：固件进入录音，设备自己显示「正在聆听」。
                         // 主机侧什么都不用推，只需要知道「现在别碰设备」。
                         recording = true;
+                        // 录音是新动作：退出总结浏览，免得录完回来还停在第 3 页。
+                        model.summary_page = None;
                         println!("[语音] 开始录音（松开确认键结束）");
                     }
                     Ok(Some(zectrix_sdk::Event::RecordingFinished { audio, reason })) => {
@@ -2712,6 +2911,7 @@ fn usage() {
   workbuddy-pet scene   [--demo <状态>]                            打印布局 JSON（调试用）
   workbuddy-pet sessions                                           列出可跟随的本机会话、状态与清单进度
   workbuddy-pet skin     list|set <id>|current                        查看/切换 Buddy 图鉴造型（守护下一帧生效）
+  workbuddy-pet summary  [on|off|show]                             任务完成后在设备上翻页看总结；show 预览分页
   workbuddy-pet check   [--target IP|ID]                           只核对设备，不推画面
   workbuddy-pet sound   --status waiting|done [--target IP|ID] [--volume 0-100]
                                                           只播放一次提示音
@@ -2760,6 +2960,7 @@ async fn main() {
         }
         "sessions" | "ls" => cmd_sessions(&args).await,
         "skin" | "buddy" | "pet" => cmd_skin(&args),
+        "summary" | "digest" => cmd_summary(&args),
         "init" | "setup" | "guide" => cmd_init(&args).await,
         "check" => cmd_check(&args).await,
         "sound" | "tone" => cmd_sound(&args).await,
@@ -2855,6 +3056,7 @@ mod tests {
             progress_source: ProgressSource::Agent,
             progress_steps: None,
             agent: "WorkBuddy".into(),
+            summary: String::new(),
         }
     }
 
@@ -2896,6 +3098,7 @@ mod tests {
             progress_source: ProgressSource::Agent,
             progress_steps: None,
             agent: "WorkBuddy".into(),
+            summary: String::new(),
         };
         let mut m = Model::default();
         m.settings.follow_enabled = true;

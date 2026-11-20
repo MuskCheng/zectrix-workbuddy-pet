@@ -59,6 +59,12 @@ pub struct Event {
     pub progress_steps: Option<(u32, u32)>,
     #[serde(default)]
     pub agent: String,
+    /// 本轮最后一条助手回复的纯文本，只用于完成页的「翻页看总结」。
+    ///
+    /// 刻意 `skip`：正文绝不写进 `state.json`（那是要长期留在磁盘上的）。
+    /// 它只在内存里活一轮，守护重启后从会话记录重新取；关闭总结时压根不填。
+    #[serde(default, skip)]
+    pub summary: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Task {
@@ -98,6 +104,16 @@ pub struct Settings {
     /// `default_pet_skin` 让它退回像素喵，升级不会把画面换成别的猫。
     #[serde(default = "default_pet_skin")]
     pub pet_skin: String,
+    /// 任务完成后是否允许在设备上翻看总结。
+    ///
+    /// 这一项要读会话里最后一条助手回复的**正文**，与「只取元数据」的默认边界
+    /// 不同，所以做成可关：关掉后连读取都不做，屏幕只停在「任务完成」。
+    #[serde(default = "default_true")]
+    pub summary_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_pet_skin() -> String {
@@ -113,6 +129,7 @@ impl Default for Settings {
             sound_enabled: true,
             volume: 90,
             pet_skin: default_pet_skin(),
+            summary_enabled: true,
         }
     }
 }
@@ -137,6 +154,12 @@ pub struct Model {
     pub quip: String,
     #[serde(skip)]
     pub selected: Option<String>,
+    /// 正在翻看第几页总结。`None` = 正常主界面。
+    ///
+    /// 与 `selected` 一样只活在内存里：设备断开、守护重启后回到主界面，
+    /// 不会因为上次停在第 3 页而看不见「任务完成」。
+    #[serde(skip)]
+    pub summary_page: Option<usize>,
     #[serde(skip)]
     pub demo: Option<Status>,
 }
@@ -265,15 +288,23 @@ impl Model {
             if event.seq == t.event.seq {
                 // 同一条记录被重新推导（守护重启后的全新扫描）：记录本身没变，
                 // 但派生字段可能变了——最典型的是会话标题在会话中途被重新生成，
-                // 重新扫描才第一次读到。内容有变就更新文案，完全一致才去重。
-                if event.status == t.event.status
-                    && (event.title != t.event.title || event.detail != t.event.detail)
-                {
-                    t.event.title = event.title;
-                    t.event.detail = event.detail;
-                    return Ok(true);
+                // 重新扫描才第一次读到；总结正文同理（它不落盘，重启后第一拍
+                // 才有机会补进来）。内容有变就更新文案，完全一致才去重。
+                if event.status != t.event.status {
+                    return Ok(false);
                 }
-                return Ok(false);
+                let text_changed = event.title != t.event.title || event.detail != t.event.detail;
+                let summary_changed =
+                    !event.summary.is_empty() && event.summary != t.event.summary;
+                if !text_changed && !summary_changed {
+                    return Ok(false);
+                }
+                t.event.title = event.title;
+                t.event.detail = event.detail;
+                if summary_changed {
+                    t.event.summary = event.summary;
+                }
+                return Ok(true);
             }
             // 会话文件会把上一轮的完成记录延迟补写进下一轮（实测存在）：
             // terminal 任务随后收到更新的非终态事件时必须复活，否则整轮从此静默。
@@ -457,6 +488,7 @@ impl Model {
                     progress_source: ProgressSource::Agent,
                     progress_steps: None,
                     agent: "演示".into(),
+                    summary: "这是一段演示用的任务总结：打开新会话，把今天的待办按优先级排好，先做影响面最大的两件，剩下的放进明天的清单。".into(),
                 },
                 source: "demo".into(),
                 updated_at: now,
@@ -543,6 +575,7 @@ mod tests {
             progress_source: ProgressSource::Agent,
             progress_steps: None,
             agent: "Agent".into(),
+            summary: String::new(),
         }
     }
     #[test]

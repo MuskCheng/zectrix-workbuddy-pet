@@ -150,7 +150,9 @@ struct Cursor {
     title: String,
     /// 本轮用户真正问了什么，逐轮更新。仅在会话没有标题时作兜底。
     turn_title: Option<String>,
-    emitted: Option<(Status, String, Option<u8>, String)>,
+    /// 上一次真正上屏的 (状态, 标题, 进度, 详情, 总结)。总结也进键：它不落盘，
+    /// 重启后第一次读到时要允许重新 emit 一次，否则完成页永远只有「任务已结束」。
+    emitted: Option<(Status, String, Option<u8>, String, String)>,
     last: Last,
     /// callId -> (工具名, 发起记录的时间戳秒)，记录等待型调用；拿到结果即移除。
     waiting: HashMap<String, (String, i64)>,
@@ -160,6 +162,11 @@ struct Cursor {
     activity: String,
     /// AskUserQuestion 的问题与选项（用户已同意上屏）；等待解除后不再使用。
     asking: String,
+    /// 本轮最后一条助手回复的正文（已压成纯文本并截断）。
+    ///
+    /// 只用于完成页的「翻页看总结」：跟着 `Event.summary` 走，`serde(skip)`
+    /// 不进 `state.json`。新轮开始时清空，所以它永远只描述最近这一轮。
+    reply: String,
     /// 主进程在 main.log 里登记的待确认类型（question/permission），
     /// 与侧边栏「待确认」徽章同源；权限卡不写会话 JSONL，只有这里有信号。
     pending_kind: Option<String>,
@@ -467,6 +474,7 @@ impl Cursor {
                             self.todos.clear();
                             self.activity.clear();
                             self.asking.clear();
+                            self.reply.clear();
                             // 新轮必须重新上屏：去重键不含 task_id，否则同标题、
                             // 同状态的下一轮会被当成「和上次一样」直接吞掉。
                             self.emitted = None;
@@ -474,7 +482,14 @@ impl Cursor {
                     }
                     "assistant" => match v["status"].as_str().unwrap_or("") {
                         // 这是「这条消息完成」，不是「这一轮结束」；是否结束由尾部判定。
-                        "completed" => self.last = Last::AssistantComplete,
+                        "completed" => {
+                            self.last = Last::AssistantComplete;
+                            // 完成页要能翻看这段回复：留最后一条的正文，压成纯文本。
+                            // 流式过程中同一条消息可能被重复写 completed，取最后一份即可。
+                            if let Some(text) = assistant_text(v) {
+                                self.reply = text;
+                            }
+                        }
                         "incomplete" | "canceled" | "cancelled" | "stopped" | "interrupted" => {
                             self.last = Last::AssistantStopped
                         }
@@ -666,12 +681,23 @@ impl Cursor {
             Status::Working => self.activity.clone(),
             _ => String::new(),
         };
-        if let Some((s, t, p, d)) = &self.emitted {
-            if *s == status && *t == title && *p == progress.map(|x| x.0) && *d == detail {
+        if let Some((s, t, p, d, m)) = &self.emitted {
+            if *s == status
+                && *t == title
+                && *p == progress.map(|x| x.0)
+                && *d == detail
+                && *m == self.reply
+            {
                 return None;
             }
         }
-        self.emitted = Some((status, title.clone(), progress.map(|x| x.0), detail.clone()));
+        self.emitted = Some((
+            status,
+            title.clone(),
+            progress.map(|x| x.0),
+            detail.clone(),
+            self.reply.clone(),
+        ));
         Some((
             Event {
                 task_id: task,
@@ -684,10 +710,124 @@ impl Cursor {
                 progress_source: ProgressSource::Todo,
                 progress_steps: progress.map(|x| (x.1, x.2)),
                 agent: "WorkBuddy".into(),
+                // 给「翻页看总结」用；关闭总结时渲染端不看它，但仍会随事件走一程。
+                // 它不进 Event 的序列化（serde(skip)），state.json 里没有正文。
+                summary: self.reply.clone(),
             },
             at,
         ))
     }
+}
+
+/// 一条 assistant 记录的正文：content 是数组，元素形如
+/// `{"type":"output_text","text":"…"}`。只拼接文本块，别的（工具调用回执等）跳过。
+fn assistant_text(v: &Value) -> Option<String> {
+    let items = v["content"].as_array()?;
+    let mut raw = String::new();
+    for it in items {
+        if let Some(t) = it["text"].as_str() {
+            if t.trim().is_empty() {
+                continue;
+            }
+            if !raw.is_empty() {
+                raw.push('\n');
+            }
+            raw.push_str(t);
+        }
+    }
+    let text = plain_text(&raw);
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// 总结最多留多少字：400×300 一页约 8 行，一行 17 个汉字，五页也就 700 字。
+/// 留到 1200 是为了把一段完整结论说清，再多没人翻。
+const SUMMARY_MAX_CHARS: usize = 1200;
+
+/// 把 Markdown 压成适合墨水屏的纯文本。
+///
+/// 目标不是「渲染」，而是「能一眼扫完」：标题符号、加粗、行内代码、链接地址、
+/// 代码块、表格分隔线全部去掉，代码块整段丢掉——总结里最没用的就是一段 shell。
+fn plain_text(raw: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_code = false;
+    for line in raw.lines() {
+        let t = line.trim();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code || t.is_empty() {
+            continue;
+        }
+        // 表格分隔线（|---|:--:|）与纯分隔符对阅读没有贡献。
+        if t.chars()
+            .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '+'))
+        {
+            continue;
+        }
+        let mut l = t
+            .trim_start_matches(['#', '>', '*', '-', '+', ' '])
+            .to_string();
+        for marker in ["**", "__", "`"] {
+            l = l.replace(marker, "");
+        }
+        l = strip_links(&l);
+        // 表格行：数据行保留竖线在 400px 屏上像乱码，换成「 · 」分隔；
+        // 分隔线（|---|）在上面已经整行跳过。
+        if l.starts_with('|') || l.ends_with('|') {
+            let cells: Vec<&str> = l
+                .split('|')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            l = cells.join(" · ");
+        }
+        // 行尾的表格竖线、多余空格一起收掉。
+        let l = l.trim().trim_end_matches('|').trim();
+        if l.is_empty() {
+            continue;
+        }
+        out.push(l.to_string());
+    }
+    let mut text = Vec::with_capacity(out.len());
+    let mut used = 0usize;
+    for line in out {
+        let n = line.chars().count();
+        if used + n > SUMMARY_MAX_CHARS {
+            let take = SUMMARY_MAX_CHARS.saturating_sub(used);
+            if take > 1 {
+                let mut s: String = line.chars().take(take - 1).collect();
+                s.push('…');
+                text.push(s);
+            }
+            break;
+        }
+        used += n;
+        text.push(line);
+    }
+    text.join("\n")
+}
+
+/// `[文字](地址)` → `文字`。只删括号里的地址，保留可读的部分。
+fn strip_links(l: &str) -> String {
+    let mut out = String::with_capacity(l.len());
+    let mut rest = l;
+    while let Some(i) = rest.find("](") {
+        out.push_str(&rest[..i]);
+        match rest[i..].find(')') {
+            Some(j) => rest = &rest[i + j + 1..],
+            None => {
+                rest = &rest[i..];
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.replace(['[', ']'], "")
 }
 
 /// WorkBuddy 主进程的任务通知日志（`~/.workbuddy/logs/main.log`）里，
@@ -1079,6 +1219,7 @@ impl Watcher {
                             fallback.clone(),
                             c.progress().map(|p| p.0),
                             c.activity.clone(),
+                            c.reply.clone(),
                         )
                     });
                 } else if c.settled(true) {
@@ -1920,5 +2061,59 @@ mod tests {
             "已删除的会话不该再出现在扫描列表里"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn assistant_reply_becomes_plain_summary() {
+        let mut c = Cursor::default();
+        c.feed(
+            &json!({"type":"message","role":"assistant","status":"completed","content":[
+                {"type":"output_text","text":"## 结论\n\n**改好了**，见 `src/main.rs`。\n\n```bash\ncargo build --release\n```\n[详情](https://example.com/x) 与 [第 2 条](https://example.com/y)"}
+            ]}),
+            "sess-0001",
+        );
+        let s = &c.reply;
+        assert!(s.contains("结论"), "{s}");
+        assert!(s.contains("改好了"), "{s}");
+        assert!(!s.contains("**"), "加粗标记应去掉：{s}");
+        assert!(!s.contains('`'), "行内代码标记应去掉：{s}");
+        assert!(!s.contains("cargo build"), "代码块整段丢弃：{s}");
+        assert!(!s.contains("example.com"), "链接地址应去掉：{s}");
+        assert!(s.contains("详情"), "链接文字要留下：{s}");
+    }
+
+    #[test]
+    fn summary_keeps_last_reply_and_drops_it_on_new_turn() {
+        let mut c = Cursor::default();
+        c.feed(
+            &json!({"type":"message","role":"assistant","status":"completed","content":[
+                {"type":"output_text","text":"第一轮结论"}
+            ]}),
+            "s",
+        );
+        assert_eq!(c.reply, "第一轮结论");
+        // 用户开了新一轮：上一轮的总结必须消失，否则完成页会显示旧任务的结论。
+        c.feed(
+            &json!({"type":"message","role":"user","timestamp":1_700_000_000_000i64,
+                    "content":[{"type":"input_text","text":"再来一个"}],
+                    "providerData":{"startsNewUserRequest":true}}),
+            "s",
+        );
+        assert!(c.reply.is_empty(), "新轮应清空上一轮总结");
+    }
+
+    #[test]
+    fn plain_text_collapses_markdown_and_truncates() {
+        let raw = "# 标题\n\n- 第一项\n- 第二项\n\n| 列 | 值 |\n|---|---|\n| a | b |\n\n结尾";
+        let out = plain_text(raw);
+        assert!(out.contains("标题"));
+        assert!(out.contains("第一项"));
+        assert!(!out.contains("|---"), "表格分隔线应去掉：{out}");
+        assert!(!out.contains("# "), "标题符号应去掉：{out}");
+        // 超长文本按字符截断，末尾带省略号，不会把整段原样带上设备。
+        let long = "汉".repeat(SUMMARY_MAX_CHARS + 50);
+        let cut = plain_text(&long);
+        assert!(cut.chars().count() <= SUMMARY_MAX_CHARS);
+        assert!(cut.ends_with('…'));
     }
 }

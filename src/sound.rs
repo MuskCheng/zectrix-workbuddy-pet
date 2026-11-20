@@ -123,6 +123,7 @@ mod tests {
                 progress_source: crate::model::ProgressSource::Agent,
                 progress_steps: None,
                 agent: "WorkBuddy".into(),
+                summary: String::new(),
             },
             source: "workbuddy".into(),
             updated_at: 1_700_000_000,

@@ -57,6 +57,11 @@ pub struct Draft {
     /// 录音开始时屏幕上正显示哪个会话。投给它的概率最高，
     /// 而「已经是这个会话」就没必要再去唤起深链（那会抢焦点、动窗口）。
     pub current: Option<String>,
+    /// 文字已经粘进输入框，正等第二次确认发送。
+    ///
+    /// 分两步是刻意的：第一次确认只粘贴，识别错了还能在电脑上改；再按一次
+    /// 才回车。设备上只有三个键，这样也足够不用键盘走完一句话。
+    pub pasted: bool,
 }
 
 impl Draft {
@@ -69,13 +74,18 @@ impl Draft {
             expires_at: now + PREVIEW_SECS,
             hint: None,
             current: None,
+            pasted: false,
         }
     }
     pub fn target(&self) -> Option<&Target> {
         self.targets.get(self.index)
     }
-    /// 上下键换目标。只有一个会话时保持在原位，不绕圈。
+    /// 上下键换目标。只有一个会话时保持在原位，不绕圈；已经粘贴后也不再换——
+    /// 文字就在那个会话的输入框里，换目标只会让人以为投到了别处。
     pub fn cycle(&mut self, step: i32) {
+        if self.pasted {
+            return;
+        }
         let n = self.targets.len();
         if n < 2 {
             return;
@@ -87,6 +97,12 @@ impl Draft {
 
 /// 识别结果在屏幕上停留多久（秒）。
 pub const PREVIEW_SECS: i64 = 20;
+
+/// 粘贴之后再给多久用来按「发送」（秒）。
+///
+/// 比识别页长：这一段是「确认动作」，用户可能先抬头看一眼电脑上的输入框，
+/// 20 秒常常不够；但也不能无限挂着，设备会一直停在确认页不跟新任务。
+pub const SEND_SECS: i64 = 45;
 
 /// 把 SDK 给的 PCM 写成 16 kHz 单声道 WAV，返回路径、时长与峰值。
 pub fn save_wav(dir: &Path, pcm: &[i16]) -> Result<Clip> {
@@ -316,6 +332,15 @@ pub fn deliver(text: &str, send: bool) -> Result<()> {
     imp::deliver(text, send)
 }
 
+/// 只按回车：把已经粘进输入框的那条消息发出去。
+///
+/// 与 `deliver(.., true)` 的区别是**不写剪贴板、不粘贴**——文字早在输入框里，
+/// 任何重写都会把用户在两段之间改过的字覆盖掉。所以这里只做一件事：
+/// 确认输入框还持有键盘焦点，然后回车。
+pub fn press_enter() -> Result<()> {
+    imp::press_enter()
+}
+
 /// 诊断：窗口状态 + 输入框定位结果。
 pub fn probe() -> Result<String> {
     imp::probe()
@@ -413,7 +438,41 @@ mod imp {
         Ok(())
     }
 
-    /// 直接把文字写进输入框的 Value，不需要窗口在前台、也不碰剪贴板。
+    /// 只回车：把输入框里已有的文字发出去。
+    ///
+    /// 焦点校验是硬条件。回车是「无差别触发」的按键——焦点跑到别的窗口，
+    /// 它可能在聊天框里发一条空消息、在文件管理器里打开文件夹，甚至确认一个
+    /// 删除对话框。宁可这次不发，也不要在看不见的地方替用户点确定。
+    pub fn press_enter() -> Result<()> {
+        let (_automation, element) = composer()?;
+        let mut ready = has_keyboard_focus(&element);
+        if !ready {
+            // 同一套抢前台：SetFocus 会顺带激活宿主窗口，比模拟按键稳。
+            let _ = focus_window();
+            for _ in 0..6 {
+                if unsafe { element.SetFocus() }.is_ok() && has_keyboard_focus(&element) {
+                    ready = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        }
+        if !ready {
+            anyhow::bail!("输入框没拿到键盘焦点，这次没有发送（避免回车发到别的窗口）");
+        }
+        // 让焦点真正落到 DOM 上再回车：刚 SetFocus 完立刻按，Electron 偶尔还没接管。
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        key_combo(&[], VK_RETURN).context("发送回车失败")?;
+        Ok(())
+    }
+
+    fn has_keyboard_focus(element: &IUIAutomationElement) -> bool {
+        unsafe { element.CurrentHasKeyboardFocus() }
+            .map(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+
     ///
     /// 这是「双屏 + 焦点在别的程序」时的兜底：Windows 的前台锁定让后台进程
     /// 抢不到焦点，但 UIA 的 ValuePattern 仍然能写。两个约束：
@@ -806,6 +865,10 @@ mod imp {
     use anyhow::Result;
 
     pub fn deliver(_text: &str, _send: bool) -> Result<()> {
+        anyhow::bail!("语音投递目前只支持 Windows")
+    }
+
+    pub fn press_enter() -> Result<()> {
         anyhow::bail!("语音投递目前只支持 Windows")
     }
 

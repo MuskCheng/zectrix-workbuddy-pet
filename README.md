@@ -4,7 +4,7 @@
 
 Windows 本机小工具，只读本机会话文件，局域网直连设备。不上传数据，不写系统目录，不需要账号。
 
-`Windows 10 / 11 x64` · `v0.4.7` · `MIT` · 单文件 5.8 MB，无 .NET / VC++ / Rust 运行时依赖
+`Windows 10 / 11 x64` · `v0.5.0` · `MIT` · 单文件 5.8 MB，无 .NET / VC++ / Rust 运行时依赖
 
 <p align="center">
   <img src="docs/skin-pixel.png" width="420" alt="设备上的一帧：正在工作">
@@ -13,7 +13,8 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
 <p align="center"><sub>设备上真实绘制的一帧（400×300），由 <code>preview --demo working</code> 渲染</sub></p>
 
 - **六套造型，六种表情**——像素喵 / 金算喵 / 暴富喵 / 星际喵 / 镜头喵 / 拿铁喵，设备上长按上/下直接换。
-- **按住确认键说话**——设备麦克风采集，本机 whisper 转写，粘贴进你选中的会话输入框。音频不出本机。
+- **按住确认键说话，再按一次发送**——两次确认：先粘进输入框，再回车发出，全程不碰键盘。音频不出本机。
+- **完成后翻页看总结**——AI 最后那段结论推到设备，↑↓ 翻页读完，不用切回电脑。
 - **状态自己会跟**——正在工作、等你确认、任务完成、空闲待命，不用切窗口，也不用刷手机。
 
 ---
@@ -21,7 +22,8 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
 ## 目录
 
 - [快速开始](#快速开始) — 装一次就能跑，含验收清单
-- [语音输入](#语音输入) — 按住确认键说话
+- [语音输入](#语音输入) — 按住确认键说话，再按一次发送
+- [任务总结](#任务总结) — 完成后翻页看 AI 的结论
 - [六套造型](#六套造型)
 - [设备按键](#设备按键)
 - [命令速查](#命令速查)
@@ -42,7 +44,7 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
    同一页面能看到**设备 IP**，可以先记下来（不记也行，程序能自动发现）。
 
 **下载并改名**：从 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest)
-下载 `workbuddy-pet-0.4.7-windows-x64.exe`，**重命名为 `workbuddy-pet.exe`**——下文所有命令都用这个名字。
+下载 `workbuddy-pet-0.5.0-windows-x64.exe`，**重命名为 `workbuddy-pet.exe`**——下文所有命令都用这个名字。
 首次运行时 Windows 可能弹「已保护你的电脑」，点「更多信息 → 仍要运行」（exe 没有代码签名，属正常）。
 
 ### 推荐：一条命令走完
@@ -134,7 +136,9 @@ Get-Content "$env:LOCALAPPDATA\zectrix-workbuddy-pet\watch.log" -Tail 20 -Encodi
 ## 语音输入
 
 设备麦克风只负责采集，**没有语音识别**；WorkBuddy 输入框也只收文字。所以音频传到电脑后
-由本机 whisper 转写，再把文字粘贴进去——**音频不出本机，不走云端**。
+由本机 whisper 转写，再把文字送进输入框——**音频不出本机，不走云端**。
+
+**两步确认，全程不用键盘**：第一次按确认键只粘贴，看一眼没错再按一次才发送。
 
 ```
 长按确认键 1 秒 → 设备开始录音（顶部「正在聆听 / 松开结束」）
@@ -142,27 +146,52 @@ Get-Content "$env:LOCALAPPDATA\zectrix-workbuddy-pet\watch.log" -Tail 20 -Encodi
 「正在识别…」→ 本机转写
    ↓
 确认页：识别文本 + 目标会话
-   确认短按 = 粘贴到输入框（不发送）
+   确认短按 = 粘进输入框（这一刻还没发出去）
    多个会话时 ↑/↓ 短按切换（最多 8 个近期会话）
-   20 秒不操作 = 丢弃
+   ↓ 再按一次确认
+回车发送 → 回到主界面
+   45 秒内没按第二次 = 放弃发送，文字仍留在输入框里，可以去电脑上手动发或删掉
 ```
 
 <table>
   <tr>
-    <td align="center"><img src="docs/voice.png" width="320" alt="单会话确认页"><br><b>日常：只有一个会话</b><br>确认键直接粘贴</td>
-    <td align="center"><img src="docs/voice-multi.png" width="320" alt="多会话确认页"><br><b>多个会话：上下键切换</b><br>底部显示当前是第几个</td>
+    <td align="center"><img src="docs/voice.png" width="300" alt="单会话确认页"><br><b>① 识别完：确认键粘贴</b><br>文字先只进输入框</td>
+    <td align="center"><img src="docs/voice-multi.png" width="300" alt="多会话确认页"><br><b>多会话：上下键切换</b><br>底部显示当前是第几个</td>
+    <td align="center"><img src="docs/voice-send.png" width="300" alt="已粘贴待发送"><br><b>② 已粘贴：再按一次发送</b><br>黑条只剩一件事</td>
   </tr>
 </table>
 
-*图中为本地渲染的真实版式（`voice preview`），不是示意稿。没有可选会话时标题显示「→ 当前窗口」，
-文字直接贴到当前输入框。*
+*图中为本地渲染的真实版式（`voice preview`、`voice preview --pasted`），不是示意稿。
+没有可选会话时标题显示「→ 当前窗口」，文字直接贴到当前输入框。*
 
 四件事先说清楚：
 
 1. **只在设备被占用时可用**（有任务在跑）。录音只能由设备发起、且必须连着；任务结束交还设备后，按键到不了程序。
-2. **只粘贴、不发送**。文字进输入框后还能改错字，自己按回车。
+2. **两次确认**：第一次粘贴、第二次发送。中间可以抬头看电脑、改错字——第二次只按回车，**不会重新粘贴**，改过的内容保留。
 3. **需要一次性装 Python + whisper**（见[前置条件](#前置条件与常见坑)第 9 条）。没装也能用宠物，只是转不出字。
 4. 首次要载模型（turbo 首次还要下载约 1.5 GB），之后每段 1 秒内出字。纯噪声或误触不会插入任何文字。
+
+## 任务总结
+
+任务完成时，设备不只知道「完成了」，还能把 AI 最后那段结论带到手边：
+
+- 完成页把**总结的第一行**直接显示在任务名下面，不按键也能看到结论开头；
+- 右下角提示「↓ 看总结」，短按下键进入总结页；
+- 总结页用 **↑/↓ 翻页**（最多 8 页，每页 7 行），**确认键退出**；末页再按下也退出；
+- 只取**最后一轮**的助手回复，压成纯文本（去掉标题符号、加粗、行内代码、代码块、链接地址，
+  表格竖线换成「 · 」），按 400px 宽度折行。
+
+<p align="center"><img src="docs/summary.png" width="420" alt="任务总结页"></p>
+
+<p align="center"><sub>本地渲染的真实版式：<code>preview --demo done --summary 0</code></sub></p>
+
+正文**只在内存里**：不写 `state.json`、不落日志，关掉开关后连读取都不做。
+
+```powershell
+.\workbuddy-pet.exe summary off    # 关闭；完成页只显示「任务完成」
+.\workbuddy-pet.exe summary on     # 重新开启（默认就是开的）
+.\workbuddy-pet.exe summary show   # 本地预览当前任务的总结分页，调版式用
+```
 
 ## 六套造型
 
@@ -188,8 +217,8 @@ Get-Content "$env:LOCALAPPDATA\zectrix-workbuddy-pet\watch.log" -Tail 20 -Encodi
 
 | 手势 | 作用 |
 | --- | --- |
-| 短按 上 / 下 | 翻任务；语音确认页里则换目标会话 |
-| 短按 确认 | 回首页并恢复自动跟随；语音确认页里则粘贴文字 |
+| 短按 上 / 下 | 翻任务；**总结页里翻页**；语音确认页里换目标会话 |
+| 短按 确认 | 回首页并恢复自动跟随；**总结页里退出**；语音确认页里粘贴，**已粘贴时再按一次发送** |
 | **长按 上 / 下** | 换宠物造型（六只循环，立即存盘） |
 | **长按 确认** | 开始录音，松开结束（固件行为） |
 
@@ -203,11 +232,12 @@ Get-Content "$env:LOCALAPPDATA\zectrix-workbuddy-pet\watch.log" -Tail 20 -Encodi
 | `init` | 首次使用引导：检查配置 → 连设备（不填 IP 自动发现）→ 预览 → 确认推送 → 自启 |
 | `check [--target <IP>]` | 只核对设备（电量、信号、灰阶），不推画面；省 IP 自动发现 |
 | `push [--demo <状态>] [--skin <id>] [--target <IP>]` | 推一帧当前画面；`--demo` 用演示数据 |
-| `preview [--demo <状态>] [--skin <id>] [--out 路径]` | 本地渲染 PNG，不连设备 |
+| `preview [--demo <状态>] [--skin <id>] [--summary 页码] [--out 路径]` | 本地渲染 PNG，不连设备 |
 | `autostart on [--target <IP>]` / `off` / `status` | 开启 / 关闭跟随、查看状态 |
 | `skin list` / `skin set <id>` / `skin current` | 查看 / 切换造型（守护下一帧生效） |
+| `summary on` / `off` / `show` | 开关「完成后翻页看总结」；`show` 预览分页结果 |
 | `voice doctor [--wav 路径]` | 检查语音环境，可顺带试转一段音频 |
-| `voice preview [--text 文本] [--out 路径]` | 本地渲染语音确认页，用于调版式 |
+| `voice preview [--text 文本] [--pasted] [--out 路径]` | 本地渲染语音确认页（`--pasted` 出「已粘贴待发送」那版） |
 | `voice targets` | 查看当前能投给哪些会话、顺序如何 |
 | `sessions` | 列出可跟随的会话及推导状态（诊断） |
 | `ensure [--verbose]` | 看门狗入口：守护不在就拉起，幂等 |
@@ -250,6 +280,10 @@ Get-Content "$env:LOCALAPPDATA\zectrix-workbuddy-pet\watch.log" -Tail 20 -Encodi
 | `~/.workbuddy/logs/main.log` | `[TaskNotify] pending/completed`：提问与权限确认卡的权威信号 |
 | `~/.workbuddy/workbuddy.db` | 侧边栏会话名、上下文占用 |
 
+**唯一的例外是任务总结**（`summary on` 时，默认开）：任务完成后读**最后一轮**助手回复的正文，
+压成纯文本、截断到 1200 字，**只放在内存里**给设备翻页看——不写 `state.json`、不进日志、
+不上传；下一轮开始即清空，`summary off` 后连读取都不做。这是唯一会碰到正文的地方，明写在这里。
+
 状态只认明确记录，不做推测：新轮次 → 正在工作；有未答复的提问或确认卡 → 等你处理；会话尾部是
 已完成的助手消息且静默 8 秒 → 任务完成；被中断 → 已停止；超过 15 分钟无更新 → 状态待确认（绝不自动判成功）。
 
@@ -258,7 +292,7 @@ Get-Content "$env:LOCALAPPDATA\zectrix-workbuddy-pet\watch.log" -Tail 20 -Encodi
 ### 方式 A：直接下载（最快，推荐给只用不开发的人）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.4.7-windows-x64.exe`，约 5.8 MB，静态链接单文件——**不需要 Rust、CMake、
+`workbuddy-pet-0.5.0-windows-x64.exe`，约 5.8 MB，静态链接单文件——**不需要 Rust、CMake、
 Visual Studio，也不需要克隆 SDK**。
 
 1. 重命名为 `workbuddy-pet.exe`（下文命令都用这个短名字）。
@@ -266,7 +300,7 @@ Visual Studio，也不需要克隆 SDK**。
 3. 想核对完整性（可选）：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.4.7-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.5.0-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 与同页 `SHA256SUMS.txt` 里的值对比（只在文件还没改名时能用这个字面名）。然后回到[快速开始](#快速开始)。
@@ -372,6 +406,9 @@ cargo build --locked --release      # 产物 target\release\workbuddy-pet.exe
 | 升级后功能没变 | 副本被旧进程占用导致沿用旧版：`autostart off` → 覆盖 exe → `autostart on`，再比对 SHA256 |
 | PowerShell 报「意外的标记」 | 带空格/引号的路径不能当命令，用 `& "完整路径\workbuddy-pet.exe"` 或先 `cd` |
 | 长按确认没反应 | 设备未被占用（任务已结束、已交还），或当前画面是待办通知（固件会当成完成待办） |
+| 按 ↓ 进不了总结 | 只有「完成」态且这一轮有回复才可翻页；`summary off` 也会关掉。用 `summary show` 看本地能不能取到
+| 第二次按确认没发送 | 多半是焦点被别的窗口抢了：屏幕上会显示「发送失败：…」，点一下 WorkBuddy 再按一次；文字仍在输入框
+| 语音粘贴后过一会儿屏幕回到主界面 | 45 秒没按第二次，草稿弃了但**文字还在输入框**，去电脑上补一下回车即可 |
 | 录音后转不出字 | 跑 `voice doctor`：没装 Python / whisper 会直接报；首次录音需等约 6 秒载模型 |
 | 文字粘到了别的窗口 | 投递要求 WorkBuddy 在前台，抢不到前台会放弃而不是硬粘。点一下 WorkBuddy 再按确认 |
 | 屏幕停在一条侧边栏已经删掉的任务上 | 0.4.5 起已按 `sessions.deleted_at` 过滤；旧版升级后重启守护即退场（日志会打印「会话已删除，退场」） |

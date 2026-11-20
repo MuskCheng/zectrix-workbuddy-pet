@@ -1,4 +1,4 @@
-use crate::model::{Model, ProgressSource, Status, TASKS_PER_PAGE};
+use crate::model::{Model, ProgressSource, Status, Task, TASKS_PER_PAGE};
 use crate::sprite;
 use serde_json::{json, Value};
 
@@ -68,6 +68,16 @@ fn ctx_label(model: &Model) -> Option<String> {
 }
 
 pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
+    // 总结视图优先：用户按了上下键就是明确要看这一页，别再混进任务状态。
+    // 条件同时校验「仍是完成态、文本还在」——期间任务被新轮次顶掉时要退回主界面。
+    if let (Some(page), Some(t)) = (model.summary_page, model.current(now)) {
+        if model.settings.summary_enabled
+            && t.status() == Status::Done
+            && !t.event.summary.is_empty()
+        {
+            return summary(&t, page).0;
+        }
+    }
     let t = model.current(now);
     let state = t.as_ref().map(|t| t.status());
     let working = state == Some(Status::Working);
@@ -158,6 +168,18 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
             .filter(|d| {
                 !d.is_empty() && !d.starts_with("WorkBuddy 等待") && !d.starts_with("权限审批")
             });
+        // 完成页先说结论：把总结的第一行作为「本轮任务已结束」的替代，
+        // 不用按键也能看到 AI 最后说了什么；要看全文再按下键翻页。
+        let summary_head = t
+            .as_ref()
+            .filter(|t| {
+                model.settings.summary_enabled
+                    && t.status() == Status::Done
+                    && !t.event.summary.is_empty()
+            })
+            .and_then(|t| t.event.summary.lines().next())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let detail = t
             .as_ref()
             .map(|t| {
@@ -171,7 +193,10 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
                         None => "请回到 WorkBuddy 确认".to_string(),
                     }
                 } else if t.status() == Status::Done {
-                    "本轮任务已结束".to_string()
+                    match &summary_head {
+                        Some(head) => title_lines(head, 30, 1).join(""),
+                        None => "本轮任务已结束".to_string(),
+                    }
                 } else if t.status() == Status::Working {
                     // 活动描述留给下方进度区显示，这里避免重复。
                     "持续跟踪任务执行".to_string()
@@ -282,10 +307,18 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
     } else {
         model.quip.as_str()
     };
+    // 完成态且这一轮有总结时，右下角改成明确的入口：不说「按哪个键」，
+    // 用户根本不知道屏幕还能往下翻（设备只有三个键，没有提示就等于没有）。
+    let can_summary = model.settings.summary_enabled
+        && model.summary_page.is_none()
+        && t.as_ref()
+            .is_some_and(|t| t.status() == Status::Done && !t.event.summary.is_empty());
     text_right(
         &mut e,
         if needs_action {
             "设备仅作提示"
+        } else if can_summary {
+            "↓ 看总结"
         } else {
             quip
         },
@@ -295,6 +328,85 @@ pub fn draw(model: &Model, now: i64, frame: usize) -> Value {
         214,
     );
     json!({"canvas":{"w":400,"h":300},"elements":e})
+}
+
+/// 总结一页放几行、每行几个汉字。
+///
+/// 15 号字在 360px 宽里约 23 个汉字；正文区从 y=104 到 y=246，行距 21，
+/// 正好 7 行。算多一行会压到底部状态栏上，算少一行则要多翻一页。
+const SUMMARY_LINE_CHARS: usize = 23;
+const SUMMARY_LINES: usize = 7;
+/// 翻页上限：再多就不是「总结」而是原文了，末尾直接截断。
+const SUMMARY_MAX_PAGES: usize = 8;
+
+/// 把总结文本折行、分页。返回每页的行，页与页之间不重叠。
+///
+/// 折行复用 `title_lines` 的宽度估算（汉字按 2、ASCII 按 0.6），和设备上的
+/// 实际排版一致；段落之间不额外留空行——墨水屏上省下来的每一行都是内容。
+pub fn summary_pages(text: &str) -> Vec<Vec<String>> {
+    let mut lines: Vec<String> = Vec::new();
+    for para in text.lines() {
+        let p = para.trim();
+        if p.is_empty() {
+            continue;
+        }
+        lines.extend(title_lines(p, SUMMARY_LINE_CHARS * 2, usize::MAX));
+    }
+    if lines.is_empty() {
+        return vec![Vec::new()];
+    }
+    let mut pages: Vec<Vec<String>> = lines
+        .chunks(SUMMARY_LINES)
+        .map(|c| c.to_vec())
+        .collect();
+    if pages.len() > SUMMARY_MAX_PAGES {
+        pages.truncate(SUMMARY_MAX_PAGES);
+        if let Some(last) = pages.last_mut().and_then(|p| p.last_mut()) {
+            if !last.ends_with('…') {
+                last.push('…');
+            }
+        }
+    }
+    pages
+}
+
+/// 完成页的「翻页看总结」：标题 + 正文 + 页码。
+///
+/// 一页只做三件事：这是哪个任务（标题）、AI 说了什么（正文）、现在在哪一页
+/// （页脚）。不画宠物——正文需要整块宽度，形象在这里只会挤掉两行字。
+pub fn summary(task: &Task, page: usize) -> (Value, usize) {
+    let pages = summary_pages(&task.event.summary);
+    let total = pages.len();
+    let idx = page.min(total.saturating_sub(1));
+    let body = pages.get(idx).cloned().unwrap_or_default();
+    let mut e = vec![];
+
+    text(&mut e, "ZECTRIX / 任务总结", 16, 19, 12, 260);
+    rect_r(&mut e, 326, 8, 58, 22, 7, Some(0));
+    text_white(&mut e, "总结", 341, 24, 14, 30);
+
+    // 标题最多两行：再长就只剩不下正文，而总结页的重点是内容不是名字。
+    let title = title_lines(&task.event.title, 24, 2);
+    let title_rows = title.len() as i32;
+    for (i, line) in title.iter().enumerate() {
+        text(&mut e, line, 20, 52 + i as i32 * 20, 17, 340);
+    }
+    rect(&mut e, 16, 62 + title_rows * 20, 368, 0, None);
+
+    // 标题占两行时正文从 104 起，占一行时多给一行空间。
+    let top = if title_rows > 1 { 104 } else { 100 };
+    let rows = if title_rows > 1 { SUMMARY_LINES } else { SUMMARY_LINES + 1 };
+    for (i, line) in body.iter().take(rows).enumerate() {
+        text(&mut e, line, 20, top + i as i32 * 21, 15, 360);
+    }
+    if body.is_empty() {
+        text(&mut e, "这一轮没有可显示的文本", 20, top, 15, 360);
+    }
+
+    rect(&mut e, 16, 271, 368, 0, None);
+    text(&mut e, &format!("第 {}/{} 页", idx + 1, total), 16, 285, 11, 120);
+    text_right(&mut e, "↑↓ 翻页 · 确认返回", 170, 285, 11, 214);
+    (json!({"canvas":{"w":400,"h":300},"elements":e}), total)
 }
 
 /// 语音投递确认页：识别文本 + 目标会话 + 还能等几秒。
@@ -336,16 +448,24 @@ pub fn voice(draft: &crate::voice::Draft, now: i64) -> Value {
     }
     // 小字跟在正文后面，别钉死在底部：只说一句话时中间留一大片空白很难看。
     let foot_y = (106 + lines.len() as i32 * lh + 6).min(228);
-    // 第二行小字平时报「录了几秒、只粘贴不发送」；投递失败后换成失败原因，
-    // 让人知道该再按一次还是去电脑上看看窗口。
+    // 第二行小字平时报「录了几秒、只粘贴不发送」；已粘贴后换成「还能改字」，
+    // 投递失败后换成失败原因——让人知道该再按一次还是去电脑上看看窗口。
     let foot = draft.hint.clone().unwrap_or_else(|| {
-        format!("{:.1} 秒录音 · 只粘贴，不发送", draft.seconds)
+        if draft.pasted {
+            "已粘贴，可在电脑上改字".to_string()
+        } else {
+            format!("{:.1} 秒录音 · 先粘贴，不发送", draft.seconds)
+        }
     });
     text(&mut e, &foot, 16, foot_y, 11, 330);
 
     // 底部操作条：黑底白字，和主界面的「回电脑确认」一致，读一眼就知道下一步。
     rect_r(&mut e, 16, 240, 368, 30, 6, Some(0));
-    let hint = if draft.targets.len() > 1 {
+    // 已粘贴时只有一件事可做：发送。这时还提示「换会话」会把人引到错的方向
+    //（文字已经在那个会话的输入框里了，换目标只会让它留在原地）。
+    let hint = if draft.pasted {
+        "确认键 发送这条消息".to_string()
+    } else if draft.targets.len() > 1 {
         format!(
             "上下键 换会话（{}/{}） · 确认键 粘贴",
             draft.index + 1,
@@ -357,7 +477,18 @@ pub fn voice(draft: &crate::voice::Draft, now: i64) -> Value {
     text_white(&mut e, &hint, 26, 260, 13, 300);
 
     let left = (draft.expires_at - now).max(0);
-    text(&mut e, &format!("{left} 秒后丢弃"), 16, 290, 11, 200);
+    text(
+        &mut e,
+        &if draft.pasted {
+            format!("{left} 秒内可发送")
+        } else {
+            format!("{left} 秒后丢弃")
+        },
+        16,
+        290,
+        11,
+        200,
+    );
     text_right(&mut e, "语音由本机转写", 200, 290, 11, 184);
 
     json!({"canvas":{"w":400,"h":300},"elements":e})
@@ -437,6 +568,75 @@ mod tests {
     }
 
     #[test]
+    fn pasted_draft_stops_cycling_targets() {
+        let t = |s: &str| crate::voice::Target {
+            session: s.into(),
+            title: s.into(),
+        };
+        let mut d = crate::voice::Draft::new("x".into(), 1.0, vec![t("a"), t("b")], 0);
+        d.pasted = true;
+        d.cycle(1);
+        assert_eq!(
+            d.target().unwrap().session,
+            "a",
+            "已经粘贴后不能再换目标——文字留在原会话的输入框里"
+        );
+    }
+
+    #[test]
+    fn summary_pages_wrap_and_respect_the_reading_area() {
+        // 一段远超一页的文本：要分成多页、每页不超行数、每行不超宽。
+        let text = "第一段结论。\n".to_string() + &"很长的说明文字，用来填满好几页。".repeat(40);
+        let pages = summary_pages(&text);
+        assert!(pages.len() > 1, "长文本必须分页");
+        assert!(pages.len() <= SUMMARY_MAX_PAGES);
+        for page in &pages {
+            assert!(!page.is_empty());
+            assert!(page.len() <= SUMMARY_LINES + 1);
+            for line in page {
+                let w: f32 = line
+                    .chars()
+                    .map(|c| if c.is_ascii() { 0.6 } else { 2.0 })
+                    .sum();
+                assert!(w <= (SUMMARY_LINE_CHARS * 2) as f32 + 0.1, "行超宽：{line}");
+            }
+        }
+        // 短文本只有一页，空文本也返回一页（渲染端据此显示占位文案）。
+        assert_eq!(summary_pages("就一句话").len(), 1);
+        assert_eq!(summary_pages("").len(), 1);
+    }
+
+    #[test]
+    fn summary_scene_stays_inside_the_canvas() {
+        let task = Task {
+            event: crate::model::Event {
+                task_id: "t".into(),
+                thread_id: None,
+                seq: 1,
+                status: Status::Done,
+                title: "把项目文档补齐并发布".into(),
+                detail: String::new(),
+                progress: None,
+                progress_source: crate::model::ProgressSource::Agent,
+                progress_steps: None,
+                agent: "WorkBuddy".into(),
+                summary: "结论：三处文档已更新。\n".to_string() + &"细节。".repeat(200),
+            },
+            source: "workbuddy".into(),
+            updated_at: 1_700_000_000,
+            stale: false,
+        };
+        let (scene, total) = summary(&task, 0);
+        assert!(total > 1);
+        let e = scene["elements"].as_array().unwrap();
+        assert!(e.len() <= 80);
+        for el in e {
+            assert!(el["x"].as_i64().unwrap() >= 0);
+            assert!(el["y"].as_i64().unwrap() < 300);
+        }
+    }
+
+    #[test]
     fn fixed_rows_survive_heartbeats_selection_and_time() {
         for count in [2usize, 3, 4, 5, 9, 10] {
             let mut m = Model::default();
@@ -453,6 +653,7 @@ mod tests {
                         progress_source: crate::model::ProgressSource::Agent,
                         progress_steps: None,
                         agent: "Test".into(),
+                        summary: String::new(),
                     },
                     "agent",
                     1,
@@ -531,6 +732,7 @@ mod tests {
                 progress_source: crate::model::ProgressSource::Todo,
                 progress_steps: None,
                 agent: "WorkBuddy".into(),
+                summary: String::new(),
             },
             "workbuddy",
             1,
@@ -571,6 +773,7 @@ mod tests {
                 progress_source: crate::model::ProgressSource::Todo,
                 progress_steps: None,
                 agent: "WorkBuddy".into(),
+                summary: String::new(),
             },
             "workbuddy",
             1,
@@ -625,6 +828,7 @@ mod tests {
                 progress_source: crate::model::ProgressSource::Todo,
                 progress_steps: None,
                 agent: "WorkBuddy".into(),
+                summary: String::new(),
             },
             "workbuddy",
             1,
