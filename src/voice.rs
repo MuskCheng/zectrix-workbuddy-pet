@@ -558,13 +558,19 @@ mod imp {
         // 必须清掉 ELECTRON_RUN_AS_NODE：从 Electron 派生的 shell 里带这个变量，
         // 会把 URL 当脚本路径交给 node，直接报 MODULE_NOT_FOUND。
         let url = format!("workbuddy://chat/{session}");
-        let status = std::process::Command::new("cmd")
-            .args(["/C", "start", "", &url])
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "start", "", &url])
             .env_remove("ELECTRON_RUN_AS_NODE")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("唤起深链失败")?;
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // 不设这个会闪一个黑框：切会话是用户按一下键就发生的事，
+            // 桌面上突然冒出命令行窗口比「慢一点」更打扰。
+            cmd.creation_flags(0x0800_0000);
+        }
+        let status = cmd.status().context("唤起深链失败")?;
         if !status.success() {
             anyhow::bail!("唤起深链失败：{status}");
         }

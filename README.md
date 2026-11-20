@@ -4,7 +4,7 @@
 
 Windows 本机小工具，只读本机会话文件，局域网直连设备。不上传数据，不写系统目录，不需要账号。
 
-`Windows 10 / 11 x64` · `v0.5.1` · `MIT` · 单文件 5.8 MB，无 .NET / VC++ / Rust 运行时依赖
+`Windows 10 / 11 x64` · `v0.5.2` · `MIT` · 单文件 5.8 MB，无 .NET / VC++ / Rust 运行时依赖
 
 <p align="center">
   <img src="docs/skin-pixel.png" width="420" alt="设备上的一帧：正在工作">
@@ -44,7 +44,7 @@ Windows 本机小工具，只读本机会话文件，局域网直连设备。不
    同一页面能看到**设备 IP**，可以先记下来（不记也行，程序能自动发现）。
 
 **下载并改名**：从 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest)
-下载 `workbuddy-pet-0.5.1-windows-x64.exe`，**重命名为 `workbuddy-pet.exe`**——下文所有命令都用这个名字。
+下载 `workbuddy-pet-0.5.2-windows-x64.exe`，**重命名为 `workbuddy-pet.exe`**——下文所有命令都用这个名字。
 首次运行时 Windows 可能弹「已保护你的电脑」，点「更多信息 → 仍要运行」（exe 没有代码签名，属正常）。
 
 ### 推荐：一条命令走完
@@ -292,7 +292,7 @@ Get-Content "$env:LOCALAPPDATA\zectrix-workbuddy-pet\watch.log" -Tail 20 -Encodi
 ### 方式 A：直接下载（最快，推荐给只用不开发的人）
 
 到 [Releases](https://github.com/MuskCheng/zectrix-workbuddy-pet/releases/latest) 下载
-`workbuddy-pet-0.5.1-windows-x64.exe`，约 5.8 MB，静态链接单文件——**不需要 Rust、CMake、
+`workbuddy-pet-0.5.2-windows-x64.exe`，约 5.8 MB，静态链接单文件——**不需要 Rust、CMake、
 Visual Studio，也不需要克隆 SDK**。
 
 1. 重命名为 `workbuddy-pet.exe`（下文命令都用这个短名字）。
@@ -300,7 +300,7 @@ Visual Studio，也不需要克隆 SDK**。
 3. 想核对完整性（可选）：
 
 ```powershell
-(Get-FileHash .\workbuddy-pet-0.5.1-windows-x64.exe -Algorithm SHA256).Hash
+(Get-FileHash .\workbuddy-pet-0.5.2-windows-x64.exe -Algorithm SHA256).Hash
 ```
 
 与同页 `SHA256SUMS.txt` 里的值对比（只在文件还没改名时能用这个字面名）。然后回到[快速开始](#快速开始)。
@@ -369,8 +369,9 @@ cargo build --locked --release      # 产物 target\release\workbuddy-pet.exe
    或 `ensure` 不会多起进程。0.4.4 起 `autostart on` 会额外注册计划任务 `zectrix-workbuddy-pet`
    （每分钟触发一次 `supervise`，已在跑则忽略）。少了这个任务，被 WorkBuddy hook 拉起来的守护
    活不过一个回合——它会跟着 hook 的作业对象一起被清理，日志里没有任何收尾。
+   任务通过 `wscript.exe` 拉一个隐藏启动器，**全程不弹任何窗口**；它的输出写在 `supervise.log`。
    **装完务必用 `autostart status` 确认「计划任务：已注册」**；若那行显示未注册且重跑仍失败，
-   多半是企业策略/终端沙箱禁止调用 `schtasks`，此时程序仍可用，只是守护被杀后要等下次发消息才恢复。
+   程序会退回直接后台拉起（依然无窗口），只是守护被杀后要等下次发消息才恢复。
 5. **exe 要在终端里跑，双击没反应**：不带参数启动只会打印用法。用 PowerShell / cmd 进入所在目录后
    `.\workbuddy-pet.exe init`（PowerShell）或 `workbuddy-pet.exe init`（cmd）。
 6. **升级要先停再换**：`autostart off` → 覆盖 exe → `autostart on`。直接 `autostart on` 也会尝试热替换，
